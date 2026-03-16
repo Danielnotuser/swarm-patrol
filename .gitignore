@@ -1,0 +1,8 @@
+build/
+install/
+log/
+results/
+useless/
+gtsam/
+install/gtsam
+.idea/

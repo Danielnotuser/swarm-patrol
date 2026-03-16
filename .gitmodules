@@ -1,0 +1,12 @@
+[submodule "src/cslam_interfaces"]
+	path = src/cslam_interfaces
+	url = https://github.com/Danielnotuser/cslam_interfaces-fork.git
+[submodule "src/cslam_visualization"]
+	path = src/cslam_visualization
+	url = https://github.com/Danielnotuser/cslam_visualization-fork.git
+[submodule "src/cslam_experiments"]
+	path = src/cslam_experiments
+	url = https://github.com/Danielnotuser/cslam_experiments-fork.git
+[submodule "src/cslam"]
+	path = src/cslam
+	url = https://github.com/Danielnotuser/cslam-fork.git
