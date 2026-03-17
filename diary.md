@@ -156,7 +156,14 @@ Gazebo:
      docker exec -it swarmslam bash -c "\
     source /opt/ros/jazzy/setup.bash; \
     source /Swarm-SLAM/install/setup.bash;\
-    colcon build --packages-select cslam_experiments"
+    cd /Swarm-SLAM && colcon build --packages-select cslam_experiments"
+```
+
+```bash
+     docker exec -it swarmslam bash -c "\
+    source /opt/ros/jazzy/setup.bash; \
+    source /Swarm-SLAM/install/setup.bash;\
+    ros2 launch cslam_experiments gazebo.launch.py"
 ```
 
 Найден еще один датасет (https://docs.ros.org/en/noetic/api/ov_core/html/gs-datasets.html)
@@ -166,7 +173,7 @@ KAIST Urban Dataset: скинули на почту sample data, но она в 
 Следующий: (https://figshare.com/articles/dataset/LiRAR_data_for_RealRecon_/28473722) хранит ros1bag'и, что также тяжело, единственный вариант - это уже в докере преобразовывать
 
 ```bash
-    docker cp ~/Swarm-SLAM/src/cslam_experiments/data/RealRecon/ swarmslam:/Swarm-SLAM/src/cslam_experiments/data/RealRecon/
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/data/RealRecon_Port/ swarmslam:/Swarm-SLAM/src/cslam_experiments/data/RealRecon_Port/
 ```
 
 Преобразование .bag ROS1 в .db3 ROS2:
@@ -178,15 +185,23 @@ KAIST Urban Dataset: скинули на почту sample data, но она в 
    python3 -m venv .venv &&\
    source .venv/bin/activate &&\
    pip install rosbags>=0.9.11 &&\
-   rosbags-convert --src data/RealRecon/lidar_data_Port.bag --dst data/RealRecon/lidar_data_Port.db3"
+   rosbags-convert --src data/RealRecon_Port/lidar_data_Port.bag --dst data/RealRecon_Port/lidar_data_Port.db3"
 ```
 
 ```bash
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
-   cd /Swarm-SLAM/src/cslam_experiments/data/RealRecon/ &&\
+   cd /Swarm-SLAM/src/cslam_experiments/data/RealRecon_Port/ &&\
    ros2 bag info lidar_data_Port.db3 -s sqlite3"
+```
+
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM/src/cslam_experiments/data/RealRecon_Port/ &&\
+   ls -la"
 ```
 
 Получилось!
@@ -209,3 +224,27 @@ Service information:
 
 Теперь стоит задача создания real_recon_lidar.launch.py файла (наподобие graco\kitti в datasets_experiments)
 
+# 17.03.26
+
+Продолжаем начатое 16.03
+
+немного подправил название в командах там.
+
+копируем launch файлы для нашего bag:
+```bash
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/launch/datasets_experiments/real_recon_lidar.launch.py swarmslam:/Swarm-SLAM/src/cslam_experiments/launch/datasets_experiments/real_recon_lidar.launch.py
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/config/real_recon_lidar.yaml swarmslam:/Swarm-SLAM/src/cslam_experiments/config/eal_recon_lidar.yaml
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/launch/odometry/rtabmap_real_recon_lidar_odometry.launch.py swarmslam:/Swarm-SLAM/src/cslam_experiments/launch/odometry/rtabmap_real_recon_lidar_odometry.launch.py
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/launch/sensors/bag_real_recon.launch.py swarmslam:/Swarm-SLAM/src/cslam_experiments/launch/sensors/bag_real_recon.launch.py
+```
+
+запускаем launch файл
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM && colcon build --packages-select cslam_experiments &&\
+   ros2 launch cslam_experiments real_recon_lidar.launch.py robot_id:=0 max_nb_robots:=1"
+```
+
+Все запускается, но вывод говорит, что ничего не публикуется в топики, какая-то ошибка в launch файлах
