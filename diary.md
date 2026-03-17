@@ -180,3 +180,32 @@ KAIST Urban Dataset: скинули на почту sample data, но она в 
    pip install rosbags>=0.9.11 &&\
    rosbags-convert --src data/RealRecon/lidar_data_Port.bag --dst data/RealRecon/lidar_data_Port.db3"
 ```
+
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM/src/cslam_experiments/data/RealRecon/ &&\
+   ros2 bag info lidar_data_Port.db3 -s sqlite3"
+```
+
+Получилось!
+
+```
+Files:             lidar_data_Port.db3.db3
+Bag size:          531.7 MiB
+Storage id:        sqlite3
+ROS Distro:        rosbags
+Duration:          140.465517177s
+Start:             Jan 18 2025 15:26:20.440191436 (1737213980.440191436)
+End:               Jan 18 2025 15:28:40.905708613 (1737214120.905708613)
+Messages:          2812
+Topic information: Topic: /lidar/odom | Type: nav_msgs/msg/Odometry | Count: 1406 | Serialization Format: cdr
+                   Topic: /lidar/point_cloud | Type: sensor_msgs/msg/PointCloud2 | Count: 1406 | Serialization Format: cdr
+Service:           0
+Service information: 
+
+```
+
+Теперь стоит задача создания real_recon_lidar.launch.py файла (наподобие graco\kitti в datasets_experiments)
+
