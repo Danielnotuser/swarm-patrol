@@ -166,6 +166,21 @@ Gazebo:
     ros2 launch cslam_experiments gazebo.launch.py"
 ```
 
+Почему-то пишет "file 'gazebo.launch.py' was found more than once in the share directory of package 'cslam_experiments': ['/Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/launch/gazebo/gazebo.launch.py', '/Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/launch/gazebo/gazebo/gazebo.launch.py']"
+
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/launch/gazebo/gazebo/"
+```
+
+Полная очистка и перезапуск colcon build:
+```bash
+    docker exec -it swarmslam bash -c "\
+    cd /Swarm-SLAM &&\
+    rm -rf build log install &&\
+    colcon build"
+```
+
+
 Найден еще один датасет (https://docs.ros.org/en/noetic/api/ov_core/html/gs-datasets.html)
 
 KAIST Urban Dataset: скинули на почту sample data, но она в bin файлах и, чтобы ее преобразовать в ros2bag, нужно преобразовать сначала в ros1bag, чего я не могу сделать на своей версии убунту (22.04)
