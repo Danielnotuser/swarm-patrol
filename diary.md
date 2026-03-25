@@ -269,3 +269,69 @@ Service information:
 Разбирался отдельно с симуляцией gazebo локально, было много конфликтов с gazebo_ros (оказалось это штука от gazebo classic тянулась), менял на ros_gz sim и тд
 
 в след раз запущу мир gazebo в докере с cslam_experiments
+
+# 25.03.26
+
+запускаем докер, добавляем gazebo 
+
+prerequisites:
+```bash
+     docker exec -it swarmslam bash -c "
+     sudo apt-get update                     &&\
+     sudo apt install software-properties-common  &&\
+     sudo add-apt-repository universe        &&\
+     sudo apt-get update                     &&\
+     sudo apt-get install -y                 \
+     ros-jazzy-ros-gz                        \
+     ros-jazzy-ros-gz-bridge                 \
+     ros-jazzy-joint-state-publisher         \
+     ros-jazzy-xacro                         \
+     ros-jazzy-teleop-twist-keyboard         \
+     ros-jazzy-teleop-twist-joy "
+```
+сам gazebo repo
+```bash
+    docker cp ~/Swarm-SLAM/src/diff_drive_robot/ swarmslam:/Swarm-SLAM/src/
+```
+собираем:
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   cd /Swarm-SLAM && colcon build --packages-select diff_drive_robot --symlink-install"
+```
+запускаем:
+```bash
+   xhost +local:docker &&\
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM &&\
+   ros2 launch diff_drive_robot robot.launch.py"
+```
+
+управляем:
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+```
+
+проверяем:
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 topic list -t"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 service list -t"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 topic echo /odom"
+```
+
+в топик постится, но какой результат должен быть? почему у namespace r0 topic r0/pointcloud есть, но r0/scan нету? Только 3Д?
