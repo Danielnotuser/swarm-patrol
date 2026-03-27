@@ -33,23 +33,9 @@
   gz_type_name: "gz.msgs.Twist"
   direction: ROS_TO_GZ
 
-# gz topic published by IMU plugin
-- ros_topic_name: "imu"
-  gz_topic_name: "imu"
-  ros_type_name: "sensor_msgs/msg/Imu"
-  gz_type_name: "gz.msgs.IMU"
-  direction: GZ_TO_ROS
-
-# gz topic published by Sensors plugin
-- ros_topic_name: "scan"
-  gz_topic_name: "scan"
-  ros_type_name: "sensor_msgs/msg/LaserScan"
-  gz_type_name: "gz.msgs.LaserScan"
-  direction: GZ_TO_ROS
-
-# gz topic published by Sensors plugin (Camera)
-- ros_topic_name: "camera/camera_info"
-  gz_topic_name: "camera/camera_info"
-  ros_type_name: "sensor_msgs/msg/CameraInfo"
-  gz_type_name: "gz.msgs.CameraInfo"
+# LiDAR PointCloud2
+- ros_topic_name: "r0/pointcloud"
+  gz_topic_name: "pointcloud"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
   direction: GZ_TO_ROS

@@ -278,7 +278,7 @@ prerequisites:
 ```bash
      docker exec -it swarmslam bash -c "
      sudo apt-get update                     &&\
-     sudo apt install software-properties-common  &&\
+     sudo apt install software-properties-common -y &&\
      sudo add-apt-repository universe        &&\
      sudo apt-get update                     &&\
      sudo apt-get install -y                 \
@@ -321,17 +321,42 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
+   gz topic -l"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   gz topic -e -t /pointcloud"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
    ros2 topic list -t"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 service list -t"
+   ros2 topic echo /r0/pointcloud"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 topic echo /odom"
+   ros2 node list"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 node info cslam_map_manager"
 ```
 
+
+
 в топик постится, но какой результат должен быть? почему у namespace r0 topic r0/pointcloud есть, но r0/scan нету? Только 3Д?
+
+# 27.03.2026
+
+в ходе вчерашнего расследования, выяснилось (пока не точно), что для работы Swarm-SLAM нужен лидар, выдающий PointCloud2 вместо LaserScan
+
+пока поменял diff_drive_robot пакет на использование gpu_lidar (но не уверен, что получится использовать)
+
+в результате pointcloud ничего не выводит (газебо успешно запускается), еще хотел посмотреть ноды активные (ros2 node info), но по какой-то причине list их видит, а info нет
