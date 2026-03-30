@@ -306,7 +306,7 @@ prerequisites:
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
-   ros2 launch diff_drive_robot robot.launch.py"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3"
 ```
 
 управляем:
@@ -314,7 +314,7 @@ prerequisites:
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
-   ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r0/cmd_vel"
 ```
 
 проверяем:
@@ -326,7 +326,7 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   gz topic -e -t /pointcloud"
+   gz topic -e -t /pointcloud/points"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -346,9 +346,10 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 node info cslam_map_manager"
+   ros2 node info /r0/cslam_map_manager"
 ```
 
+ROS_DOMAIN_ID=
 
 
 в топик постится, но какой результат должен быть? почему у namespace r0 topic r0/pointcloud есть, но r0/scan нету? Только 3Д?
@@ -360,3 +361,18 @@ prerequisites:
 пока поменял diff_drive_robot пакет на использование gpu_lidar (но не уверен, что получится использовать)
 
 в результате pointcloud ничего не выводит (газебо успешно запускается), еще хотел посмотреть ноды активные (ros2 node info), но по какой-то причине list их видит, а info нет
+
+# 28.03.26
+
+запустить swarm slam vizualization, static publisher
+
++ несколько роботов
+
+# 30.03.26
+
+Успешно запущен cslam_visualization с визуализацией pose graph и pointcloud'a
+
+Изменены launch файлы и urdf для запуска нескольких роботов в газебо, однако почему-то в cslam_visualization граф поз и поинтклауд не виден
+
+Остается задача запуска нескольких роботов и static publisher (нужно понять откуда куда трансформировать, по идее diff_robot_0/base_link/lidar_sensor в robot0_map/)
+

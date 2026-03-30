@@ -1,36 +1,36 @@
 <?xml version="1.0"?>
-<robot>
-    <!-- Differential drive plugin -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:arg name="ns" default="r0"/>
+
     <gazebo>
         <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
-            <right_joint>right_wheel_joint</right_joint>
-            <left_joint>left_wheel_joint</left_joint>
+            <right_joint>$(arg ns)/right_wheel_joint</right_joint>
+            <left_joint>$(arg ns)/left_wheel_joint</left_joint>
             <wheel_separation>0.35</wheel_separation>
             <wheel_radius>0.05</wheel_radius>
             <max_linear_acceleration>10</max_linear_acceleration>
-            <topic>cmd_vel</topic>
+            <topic>$(arg ns)/cmd_vel</topic>
         </plugin>
 
-        <!-- Odometry publisher -->
         <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
-            <odom_frame>odom</odom_frame>
-            <robot_base_frame>base_link</robot_base_frame>
+            <odom_frame>$(arg ns)/odom</odom_frame>
+            <robot_base_frame>$(arg ns)/base_link</robot_base_frame>
             <odom_publish_frequency>50</odom_publish_frequency>
-            <odom_topic>/odom</odom_topic>
-            <tf_topic>/tf</tf_topic>
+            <odom_topic>$(arg ns)/odom</odom_topic>
+            <tf_topic>$(arg ns)/tf</tf_topic>
             <dimensions>2</dimensions>
         </plugin>
 
-        <!-- Joint state publisher -->
         <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
-            <topic>joint_states</topic>
-            <joint_name>right_wheel_joint</joint_name>
-            <joint_name>left_wheel_joint</joint_name>
+            <topic>$(arg ns)/joint_states</topic>
+            <joint_name>$(arg ns)/right_wheel_joint</joint_name>
+            <joint_name>$(arg ns)/left_wheel_joint</joint_name>
         </plugin>
     </gazebo>
 
     <!-- LiDAR (PointCloud2) -->
-    <gazebo reference="laser_frame">
+    <gazebo reference="$(arg ns)/laser_frame">
         <sensor type="gpu_ray" name="lidar_sensor">
             <pose>0 0 0 0 0 0</pose>
             <visualize>true</visualize>
@@ -62,8 +62,8 @@
                 </noise>
                 <output_type>point_cloud</output_type>
             </ray>
-            <topic>pointcloud</topic>
-            <frame_name>laser_frame</frame_name>
+            <topic>$(arg ns)/pointcloud</topic>
+            <frame_name>$(arg ns)/laser_frame</frame_name>
         </sensor>
     </gazebo>
 </robot>
