@@ -15,11 +15,7 @@ def spawn_robots(context, *args, **kwargs):
     world = LaunchConfiguration('world').perform(context)
     package_dir = get_package_share_directory('diff_drive_robot')
     urdf_xacro_path = os.path.join(package_dir, 'urdf', 'robot.xacro')
-    template_yaml_path = os.path.join(package_dir, 'config', 'gz_bridge.yaml.in')
-
-    # Читаем шаблон один раз
-    with open(template_yaml_path, 'r') as f:
-        template_content = f.read()
+    bridge_config = os.path.join(package_dir, 'config', 'gz_bridge.yaml')
 
     actions = []
 
@@ -53,18 +49,16 @@ def spawn_robots(context, *args, **kwargs):
         )
         actions.append(rsp_node)
 
-        # Создаём временный YAML-файл для этого робота
-        yaml_content = template_content.replace('{{ namespace }}', ns)
-        # Используем уникальное имя в /tmp
-        yaml_file = f'/tmp/gz_bridge_{ns}.yaml'
-        with open(yaml_file, 'w') as f:
-            f.write(yaml_content)
-
         # Узел моста с этим файлом конфигурации
         bridge_node = Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
-            arguments=['--ros-args', '-p', f'config_file:={yaml_file}'],
+            arguments=[
+                '--ros-args',
+                '-p', 'expand_gz_topic_names:=true',
+                '-p', f'config_file:={bridge_config}'
+            ],
+            namespace=ns,
             output='screen'
         )
         actions.append(bridge_node)

@@ -45,7 +45,10 @@ Build cslam_visualization
 ```
 Запуск визуализации:
 ```bash
-    docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM/src/cslam_visualization && ros2 launch cslam_visualization visualization_lidar.launch.py"
+    docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
+    source /Swarm-SLAM/install/setup.bash; \
+    cd Swarm-SLAM/src/cslam_visualization &&\
+    ros2 launch cslam_visualization visualization_lidar.launch.py"
 ```
 
 ### Итог: запустился rviz, но пустой остается даже после запуска make swarmslam-lidar
@@ -287,7 +290,8 @@ prerequisites:
      ros-jazzy-joint-state-publisher         \
      ros-jazzy-xacro                         \
      ros-jazzy-teleop-twist-keyboard         \
-     ros-jazzy-teleop-twist-joy "
+     ros-jazzy-teleop-twist-joy              \
+     ros-jazzy-rqt-graph"
 ```
 сам gazebo repo
 ```bash
@@ -314,7 +318,7 @@ prerequisites:
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
-   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r0/cmd_vel"
+   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r1/cmd_vel"
 ```
 
 проверяем:
@@ -336,7 +340,12 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 topic echo /r0/pointcloud"
+   rqt_graph"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 topic echo /r0/cslam/heartbeat "
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -376,3 +385,27 @@ ROS_DOMAIN_ID=
 
 Остается задача запуска нескольких роботов и static publisher (нужно понять откуда куда трансформировать, по идее diff_robot_0/base_link/lidar_sensor в robot0_map/)
 
+# 31.03.26
+
+запускаем static publisher
+
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 diff_bot_1/r1/base_link/lidar_sensor robot0_map"
+```
+
+почему-то в cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py ROS_DOMAIN_ID задается как номер робота, что неправильно (?), ведь нужен один домен для всех роботов,
+поменяем:
+```bash
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py swarmslam:/Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py
+```
+```bash
+    docker exec -it swarmslam bash -c "env"
+```
+
+даже с одним ROS_DOMAIN_ID только 0-й робот выводится в cslam_visualization, хотя отличия от 1-го робота только в неймспейсе и robot_id
+
+также на rqt_graph не выводится /r1 ноды и топики по какой-то причине (make swarmslam-lidar запущен)
+
+предполагаю, что либо experiment_lidar.launch.py только для одного робота предназаначен (что вряд ли) либо я как-то неправильно запускаю второй, потому что в списке топиков не появляются такие же cslam топики, как у r0
