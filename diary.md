@@ -24,19 +24,15 @@
 ```bash
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM/src/cslam_visualization && sudo apt-get update && sudo apt-get install -y ros-jazzy-rtabmap ros-jazzy-rtabmap-ros"
 ```
-Build cslam_visualization
+Build cslam_visualization вместе со всеми
 ```bash
-    docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM/src/cslam_visualization && colcon build"
+    docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM && colcon build --packages-select cslam_visualization"
 ```
 Установка Zenoh-bridge: (не получилось)
 ```bash
     docker exec -t swarmslam bash -c "curl -L https://download.eclipse.org/zenoh/debian-repo/zenoh-public-key | sudo gpg --dearmor --yes --output /etc/apt/keyrings/zenoh-public-key.gpg; \
     echo 'deb [signed-by=/etc/apt/keyrings/zenoh-public-key.gpg] https://download.eclipse.org/zenoh/debian-repo/ /' | sudo tee -a /etc/apt/sources.list > /dev/null; \
     sudo apt-get update; sudo apt-get install -y zenohd zenoh-plugin-ros2dds"
-```
-Копирование папки install в docker:
-```bash
-  docker cp ~/Swarm-SLAM/install/cslam_visualization swarmslam:/Swarm-SLAM/install
 ```
 Преднастройка визуализации (rviz, gazebo, xlocal):  **(upd. 06.03.26)**
 ```bash
@@ -47,7 +43,8 @@ Build cslam_visualization
 ```bash
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
     source /Swarm-SLAM/install/setup.bash; \
-    cd Swarm-SLAM/src/cslam_visualization &&\
+    cd Swarm-SLAM &&\
+    export ROS_DOMAIN_ID=0 &&\
     ros2 launch cslam_visualization visualization_lidar.launch.py"
 ```
 
@@ -291,7 +288,9 @@ prerequisites:
      ros-jazzy-xacro                         \
      ros-jazzy-teleop-twist-keyboard         \
      ros-jazzy-teleop-twist-joy              \
-     ros-jazzy-rqt-graph"
+     ros-jazzy-rqt-graph                     \
+     ros-jazzy-rtabmap                       \
+     ros-jazzy-rtabmap-ros"
 ```
 сам gazebo repo
 ```bash
@@ -313,7 +312,14 @@ prerequisites:
    ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3"
 ```
 
-управляем:
+управляем 0-ым роботом:
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r0/cmd_vel"
+```
+управляем 1-ым роботом:
 ```bash
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
@@ -335,17 +341,22 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
+   export ROS_DOMAIN_ID=0; \
    ros2 topic list -t"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
    rqt_graph"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 topic echo /r0/cslam/heartbeat "
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   ros2 topic echo /cslam/pose_graph "
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -392,7 +403,8 @@ ROS_DOMAIN_ID=
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 diff_bot_1/r1/base_link/lidar_sensor robot0_map"
+   export ROS_DOMAIN_ID=0 &&\
+   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot1_map robot0_map"
 ```
 
 почему-то в cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py ROS_DOMAIN_ID задается как номер робота, что неправильно (?), ведь нужен один домен для всех роботов,
@@ -400,6 +412,14 @@ ROS_DOMAIN_ID=
 ```bash
     docker cp ~/Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py swarmslam:/Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py
 ```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   cp /Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py /Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/launch/robot_experiments/
+   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=3 --debug"
+```
+
 ```bash
     docker exec -it swarmslam bash -c "env"
 ```
@@ -409,3 +429,11 @@ ROS_DOMAIN_ID=
 также на rqt_graph не выводится /r1 ноды и топики по какой-то причине (make swarmslam-lidar запущен)
 
 предполагаю, что либо experiment_lidar.launch.py только для одного робота предназаначен (что вряд ли) либо я как-то неправильно запускаю второй, потому что в списке топиков не появляются такие же cslam топики, как у r0
+
+# 01.04.26
+
+с копированием обновленного experment_lidar.launch.py в install/share в визуализации появились точки другого цвета, отвечающие за 1-й робот, однако при попытке вывода графа поз общего выводится только 0-е позы и поинтклауд (если находится в robot0_map фрейме)
+
+при публикации static_transform из robot1_map в robot0_map видны прошлые позы 1-го робота, но новые не появляются
+
+при выключении swarm-slam 0-го робота внезапно на rviz появились все позы 1-го робота с поинтклаудом
