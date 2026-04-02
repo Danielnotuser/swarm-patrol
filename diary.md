@@ -44,7 +44,6 @@ Build cslam_visualization вместе со всеми
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
     source /Swarm-SLAM/install/setup.bash; \
     cd Swarm-SLAM &&\
-    export ROS_DOMAIN_ID=0 &&\
     ros2 launch cslam_visualization visualization_lidar.launch.py"
 ```
 
@@ -420,10 +419,6 @@ ROS_DOMAIN_ID=
    ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=3 --debug"
 ```
 
-```bash
-    docker exec -it swarmslam bash -c "env"
-```
-
 даже с одним ROS_DOMAIN_ID только 0-й робот выводится в cslam_visualization, хотя отличия от 1-го робота только в неймспейсе и robot_id
 
 также на rqt_graph не выводится /r1 ноды и топики по какой-то причине (make swarmslam-lidar запущен)
@@ -437,3 +432,28 @@ ROS_DOMAIN_ID=
 при публикации static_transform из robot1_map в robot0_map видны прошлые позы 1-го робота, но новые не появляются
 
 при выключении swarm-slam 0-го робота внезапно на rviz появились все позы 1-го робота с поинтклаудом
+
+# 02.04.26
+
+отношение TF
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   ros2 run tf2_tools view_frames"
+```
+```bash
+    docker cp swarmslam:frames_2026-04-02_18.57.40.pdf  ~/Swarm-SLAM/data/
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   ls -la"
+```
+
+доп логирование сообщения в колбеке визуализации поз графа
+```bash
+    docker cp ~/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py swarmslam:/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py
+```
