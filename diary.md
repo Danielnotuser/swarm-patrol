@@ -20,21 +20,29 @@
 ```
 Произведена следующая последовательность команд:
 
-Установка rtabmap
+Установка rtabmap (не используется, т.к. устнавливается при вызове газебо)
 ```bash
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM/src/cslam_visualization && sudo apt-get update && sudo apt-get install -y ros-jazzy-rtabmap ros-jazzy-rtabmap-ros"
 ```
+
 Build cslam_visualization вместе со всеми
 ```bash
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; source /Swarm-SLAM/install/setup.bash; cd Swarm-SLAM && colcon build --packages-select cslam_visualization"
 ```
-Установка Zenoh-bridge: (не получилось)
+Установка Zenoh-bridge: (02.03.26)
 ```bash
     docker exec -t swarmslam bash -c "curl -L https://download.eclipse.org/zenoh/debian-repo/zenoh-public-key | sudo gpg --dearmor --yes --output /etc/apt/keyrings/zenoh-public-key.gpg; \
     echo 'deb [signed-by=/etc/apt/keyrings/zenoh-public-key.gpg] https://download.eclipse.org/zenoh/debian-repo/ /' | sudo tee -a /etc/apt/sources.list > /dev/null; \
-    sudo apt-get update; sudo apt-get install -y zenohd zenoh-plugin-ros2dds"
+    sudo apt-get update; sudo apt-get install -y zenohd zenoh-bridge-ros2dds"
 ```
-Преднастройка визуализации (rviz, gazebo, xlocal):  **(upd. 06.03.26)**
+
+```bash
+    docker exec -it swarmslam bash -c "\
+    sudo ln -sf /bin/true /usr/bin/systemctl &&\
+    sudo dpkg --configure -a"
+```
+
+Преднастройка визуализации (rviz, gazebo, xlocal):  **(upd. 06.03.26)** (не используется, т.к. устнавливается при вызове газебо)
 ```bash
     cd src/cslam_experiments/docker
     make viz
@@ -44,7 +52,17 @@ Build cslam_visualization вместе со всеми
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
     source /Swarm-SLAM/install/setup.bash; \
     cd Swarm-SLAM &&\
+    export ROS_DOMAIN_ID=100 &&\
     ros2 launch cslam_visualization visualization_lidar.launch.py"
+```
+
+Запуск zenoh-bridge:
+```bash
+    docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
+    source /Swarm-SLAM/install/setup.bash; \
+    cd Swarm-SLAM &&\
+    export ROS_DOMAIN_ID=100 &&\
+    zenoh-bridge-ros2dds -c src/cslam_visualization/config/zenoh_cslam.json5"
 ```
 
 ### Итог: запустился rviz, но пустой остается даже после запуска make swarmslam-lidar
@@ -340,7 +358,6 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   export ROS_DOMAIN_ID=0; \
    ros2 topic list -t"
 ```
 ```bash
@@ -355,12 +372,20 @@ prerequisites:
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    export ROS_DOMAIN_ID=0 &&\
-   ros2 topic echo /cslam/pose_graph "
+   sudo apt-get update && sudo apt-get install ros-jazzy-rqt-tf-tree -y
+   ros2 run rqt_tf_tree rqt_tf_tree"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   ros2 node list"
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=1 &&\
+   ros2 topic echo /cslam/viz/pose_graph_markers"
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   ros2 node list --all"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -440,11 +465,10 @@ ROS_DOMAIN_ID=
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
-   export ROS_DOMAIN_ID=0 &&\
    ros2 run tf2_tools view_frames"
 ```
 ```bash
-    docker cp swarmslam:frames_2026-04-02_18.57.40.pdf  ~/Swarm-SLAM/data/
+    docker cp swarmslam:/root/.ros/log/2026-04-03-19-14-43-263507-dan-ETBook-55617  ~/Swarm-SLAM/data/
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -457,3 +481,28 @@ ROS_DOMAIN_ID=
 ```bash
     docker cp ~/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py swarmslam:/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py
 ```
+
+# 03.04.26
+
+похоже, что работа без zenoh bridge не предусмотрена (точнее не работает просто), пытаемся настроить zenoh в докере:
+
+Установка Zenoh-bridge: (02.03.26)
+```bash
+    docker exec -t swarmslam bash -c "curl -L https://download.eclipse.org/zenoh/debian-repo/zenoh-public-key | sudo gpg --dearmor --yes --output /etc/apt/keyrings/zenoh-public-key.gpg; \
+    echo 'deb [signed-by=/etc/apt/keyrings/zenoh-public-key.gpg] https://download.eclipse.org/zenoh/debian-repo/ /' | sudo tee -a /etc/apt/sources.list > /dev/null; \
+    sudo apt-get update; sudo apt-get install -y zenohd zenoh-plugin-ros2dds"
+```
+
+```bash
+    docker exec -it swarmslam bash -c "\
+    sudo ln -sf /bin/true /usr/bin/systemctl &&\
+    sudo dpkg --configure -a"
+```
+
+```bash
+    docker exec -it swarmslam bash -c "\
+    which zenohd;
+    which zenoh-plugin-ros2dds"
+```
+
+zenoh получилось запустить, но почему-то визуализация не видит оба робота (в ROS_DOMAIN_ID=100 запущена визуализация с мостом)
