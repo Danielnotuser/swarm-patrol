@@ -62,7 +62,7 @@ Build cslam_visualization вместе со всеми
     source /Swarm-SLAM/install/setup.bash; \
     cd Swarm-SLAM &&\
     export ROS_DOMAIN_ID=100 &&\
-    zenoh-bridge-ros2dds -c src/cslam_visualization/config/zenoh_cslam.json5"
+    zenoh-bridge-ros2dds -e tcp/127.0.0.1:7447 -c src/cslam_visualization/config/zenoh_cslam.json5"
 ```
 
 ### Итог: запустился rviz, но пустой остается даже после запуска make swarmslam-lidar
@@ -326,6 +326,7 @@ prerequisites:
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
+   export ROS_DOMAIN_ID=0 &&\
    ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3"
 ```
 
@@ -334,6 +335,7 @@ prerequisites:
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
+   export ROS_DOMAIN_ID=0 &&\
    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r0/cmd_vel"
 ```
 управляем 1-ым роботом:
@@ -341,6 +343,7 @@ prerequisites:
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
+   export ROS_DOMAIN_ID=1 &&\
    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r1/cmd_vel"
 ```
 
@@ -358,6 +361,7 @@ prerequisites:
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
+   export ROS_DOMAIN_ID=1 &&\
    ros2 topic list -t"
 ```
 ```bash
@@ -379,8 +383,8 @@ prerequisites:
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
-   export ROS_DOMAIN_ID=1 &&\
-   ros2 topic echo /cslam/viz/pose_graph_markers"
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 topic echo /tf_static --once"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -427,7 +431,7 @@ ROS_DOMAIN_ID=
 ```bash
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
-   export ROS_DOMAIN_ID=0 &&\
+   export ROS_DOMAIN_ID=100 &&\
    ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot1_map robot0_map"
 ```
 
@@ -441,7 +445,7 @@ ROS_DOMAIN_ID=
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    cp /Swarm-SLAM/src/cslam_experiments/launch/robot_experiments/experiment_lidar.launch.py /Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/launch/robot_experiments/
-   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=3 --debug"
+   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=3"
 ```
 
 даже с одним ROS_DOMAIN_ID только 0-й робот выводится в cslam_visualization, хотя отличия от 1-го робота только в неймспейсе и robot_id
@@ -477,9 +481,9 @@ ROS_DOMAIN_ID=
    ls -la"
 ```
 
-доп логирование сообщения в колбеке визуализации поз графа
+доп логирование сообщения в колбеке визуализации поз графа (копируем полностью, чтобы еще конфиги обновить)
 ```bash
-    docker cp ~/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py swarmslam:/Swarm-SLAM/src/cslam_visualization/cslam_visualization/pose_graph_visualizer.py
+    docker cp ~/Swarm-SLAM/src/cslam_visualization/ swarmslam:/Swarm-SLAM/src/cslam_visualization/
 ```
 
 # 03.04.26
@@ -506,3 +510,36 @@ ROS_DOMAIN_ID=
 ```
 
 zenoh получилось запустить, но почему-то визуализация не видит оба робота (в ROS_DOMAIN_ID=100 запущена визуализация с мостом)
+
+# 04.04.26
+
+Добавляем явный роутер (запуск перед всем)
+```bash
+    docker exec -it swarmslam bash -c "zenohd -l tcp/0.0.0.0:7447"
+```
+обновляем конфиги
+```bash
+    docker cp ~/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5 swarmslam:/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5
+```
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   cp /Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5 /Swarm-SLAM/install/cslam_experiments/share/cslam_experiments/config/zenoh/zenoh_cslam.json5 &&\
+   export ROS_DOMAIN_ID=1 &&\
+   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=3"
+```
+
+почитать исходники, доделать визуализации, DARP начать
+
+# 07.04.26
+
+получилось запустить визуализацию для обоих роботов в одном фрейме для этого:
++ запущена визуализация с мостом в домене 100
++ роботы в доменах 0 и 1
++ газебо в доменах 0 и 1 со своими телеопами (! в этом раньше была ошибка, т.к. газебо был запущен в одном домене (по умолч. =0))
++ и пришлось все равно в 100 домене сделать static_transform robot1_map robot0_map, чтобы видеть обоих одновременно, но по отдельности их можно видеть в разных фреймах (раньше даже это не работало)
+
+скорее всего при использовании одного домена какие-то топики перетираются, возможно tf
+
+постараться пофиксить газебо конфиги, чтобы в одном домене можно было бы работать, хотя наверно не обязательно ¯\_(ツ)_/¯
