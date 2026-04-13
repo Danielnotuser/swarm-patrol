@@ -326,7 +326,7 @@ prerequisites:
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
-   export ROS_DOMAIN_ID=0 &&\
+   export ROS_DOMAIN_ID=1 &&\
    ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3"
 ```
 
@@ -384,7 +384,7 @@ prerequisites:
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    export ROS_DOMAIN_ID=100 &&\
-   ros2 topic echo /tf_static --once"
+   ros2 topic echo /cslam/viz/cloudmarker --once"
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -517,7 +517,7 @@ zenoh получилось запустить, но почему-то визуа
 ```bash
     docker exec -it swarmslam bash -c "zenohd -l tcp/0.0.0.0:7447"
 ```
-обновляем конфиги
+обновляем конфиги 
 ```bash
     docker cp ~/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5 swarmslam:/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5
 ```
@@ -542,4 +542,45 @@ zenoh получилось запустить, но почему-то визуа
 
 скорее всего при использовании одного домена какие-то топики перетираются, возможно tf
 
-постараться пофиксить газебо конфиги, чтобы в одном домене можно было бы работать, хотя наверно не обязательно ¯\_(ツ)_/¯
+постараться пофиксить газебо конфиги, чтобы в одном домене можно было бы работать, хотя наверно не обязательно ¯\\\_(ツ)_/¯
+
+# 11.04.26
+
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   rviz2"
+```
+
+доделать darp, используя cslam/viz/pointcloud_marker в качестве входа, также сервис для запуска
+
+# 13.04.26
+
+обновлен darp_node: добавлен сервис WakeUp для запуска DARP в спящей darp_node, 
+
+вход: /cslam/viz/cloudmaker
+
+выход: /rN/darp/route и /rN/darp/area
+
+запуск ноды должен происходить перед всеми нодами, так как он слушает визуализацию. будет запускаться в домене визуализации - 100
+
+```bash
+    docker cp ~/Swarm-SLAM/src/darp swarmslam:/Swarm-SLAM/src/darp
+```
+
+```bash
+    docker exec -it swarmslam bash -c "\
+    source /opt/ros/jazzy/setup.bash; \
+    source /Swarm-SLAM/install/setup.bash; \
+    cd Swarm-SLAM && colcon build --packages-select darp"
+```
+
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 run darp darp_node"
+```

@@ -1,0 +1,8 @@
+float32 resolution
+float32 padding
+float32 obstacle_dilation
+bool use_equal_portions
+float32[] portions
+---
+bool success
+string message
