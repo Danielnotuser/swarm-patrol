@@ -22,7 +22,8 @@
      ros-jazzy-rqt-graph                     \
      ros-jazzy-rtabmap                       \
      ros-jazzy-rtabmap-ros                   \
-     python3.12-venv"
+     python3.12-venv                         \
+     ros-jazzy-nav2-bringup"
 ```
 
 Копирования тестового gazebo
@@ -45,7 +46,17 @@
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=0 &&\
-   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2"
+```
+
+Запуск gazebo для 1-го робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM &&\
+   export ROS_DOMAIN_ID=1 &&\
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2"
 ```
 
 Управляем 0-ым роботом:
@@ -62,46 +73,48 @@
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash;\
-   export ROS_DOMAIN_ID=0 &&\
+   export ROS_DOMAIN_ID=1 &&\
    ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap /cmd_vel:=/r1/cmd_vel"
 ```
 
 ```bash
-    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/darp"
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/darp_areas"
 ```
 
 ```bash
-    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/darp"
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/darp_areas"
 ```
 
+```bash
+    docker cp ~/Swarm-SLAM/src/darp_areas/darp_bridge_node.py swarmslam:/Swarm-SLAM/src/darp_areas
+```
 
 Копируем darp
 ```bash
-    docker cp ~/Swarm-SLAM/src/darp swarmslam:/Swarm-SLAM/src/darp
+    docker cp ~/Swarm-SLAM/src/darp_areas swarmslam:/Swarm-SLAM/src/darp_areas
 ```
 
 Устанавливаем зависимости
 ```bash
     docker exec -it swarmslam bash -c "\
-    cd /Swarm-SLAM/src/darp/src && ./Dependencies.sh .venv"
+    cd /Swarm-SLAM/src/darp_areas/src && ./Dependencies.sh .venv"
 ```
 
 Собираем darp package
 ```bash
     docker exec -it swarmslam bash -c "\
     source /opt/ros/jazzy/setup.bash; 
-    source /Swarm-SLAM/install/setup.bash;
-    cd Swarm-SLAM && colcon build --packages-select darp"
+    cd Swarm-SLAM && colcon build --packages-select darp_areas"
 ```
 
 Запускаем darp_node
 ```bash
    docker exec -it swarmslam bash -c "\
-   source /opt/ros/jazzy/setup.bash; \
-   source /Swarm-SLAM/install/setup.bash; \
-   source /Swarm-SLAM/src/darp/src/.venv/bin/activate; \
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   source /Swarm-SLAM/src/darp_areas/src/.venv/bin/activate &&\
    export ROS_DOMAIN_ID=100 &&\
-   ros2 run darp darp_bridge_node.py"
+   ros2 run darp_areas darp_bridge_node.py"
 ```
 
 Копируем cslam_visualization в докер
@@ -144,13 +157,29 @@
     zenoh-bridge-ros2dds -e tcp/127.0.0.1:7447 -c src/cslam_visualization/config/zenoh_cslam.json5"
 ```
 
-Запуск визуализации (домен 100):
+Запуск визуализацию (домен 100):
 ```bash
     docker exec -it swarmslam bash -c "source /opt/ros/jazzy/setup.bash; \
     source /Swarm-SLAM/install/setup.bash; \
     cd Swarm-SLAM &&\
     export ROS_DOMAIN_ID=100 &&\
     ros2 launch cslam_visualization visualization_lidar.launch.py"
+```
+
+Запускаем static publisher
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot1_map robot0_map"
+```
+
+Запускаем static publisher
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot0_keyframe0 robot0_map"
 ```
 
 Обновляем конфиги для cslam_experiments
@@ -161,10 +190,53 @@
 
 Запускаем cslam_experiments для 0 робота с zenoh (домен 0)
 ```bash
-    cd ~/Swarm-SLAM/src/cslam_experiments/docker/ && make swarmslam-lidar ROBOT_ID=0
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=0 max_nb_robots:=2"
 ```
 
 Запускаем cslam_experiments для 1 робота с zenoh (домен 1)
 ```bash
-    cd ~/Swarm-SLAM/src/cslam_experiments/docker/ && make swarmslam-lidar ROBOT_ID=1
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=1 &&\
+   ros2 launch cslam_experiments experiment_lidar.launch.py robot_id:=1 max_nb_robots:=2"
+```
+
+Запускаем DARP через сервис
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.8, padding: 0.1, obstacle_dilation: 0.2, use_equal_portions: true, portions: []}\""
+```
+
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/nav_darp /Swarm-SLAM/install/nav_darp"
+```
+
+Копируем nav_darp
+```bash
+    docker cp ~/Swarm-SLAM/src/nav_darp swarmslam:/Swarm-SLAM/src/nav_darp
+```
+
+Собираем nav_darp package
+```bash
+    docker exec -it swarmslam bash -c "\
+    source /opt/ros/jazzy/setup.bash; 
+    cd Swarm-SLAM && colcon build --packages-select nav_darp"
+```
+
+Запускаем nav_darp
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=0 &&\
+   chmod +x /Swarm-SLAM/src/nav_darp/darp_path_follower.py &&\
+   ros2 launch nav_darp robot_nav.launch.py"
 ```

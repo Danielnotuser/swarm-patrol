@@ -42,7 +42,7 @@ def spawn_robots(context, *args, **kwargs):
             namespace=ns,
             output='screen',
             parameters=[{
-                'use_sim_time': True,
+                'use_sim_time': False,
                 'robot_description': urdf_str,
             }],
             remappings=[('/tf', f'/{ns}/tf'), ('/tf_static', f'/{ns}/tf_static')]

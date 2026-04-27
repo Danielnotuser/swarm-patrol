@@ -11,5 +11,5 @@
 	path = src/cslam
 	url = https://github.com/Danielnotuser/cslam-fork.git
 [submodule "src/darp/src"]
-	path = src/darp/src
+	path = src/darp_areas/src
 	url = https://github.com/Danielnotuser/darp.git

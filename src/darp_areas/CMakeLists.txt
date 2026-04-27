@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
-project(darp)
+project(darp_areas)
 
-# --- Dependencies ---
+# --- Зависимости ---
 find_package(ament_cmake REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -10,25 +10,20 @@ find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# --- Generate service ---
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/WakeUp.srv"
-)
-
-ament_export_dependencies(rosidl_default_runtime)
-
-# --- Install Python node ---
-install(PROGRAMS
-  darp_bridge_node.py
-  DESTINATION lib/${PROJECT_NAME}/
+  DEPENDENCIES std_msgs
 )
 
 install(DIRECTORY
   src
-  DESTINATION share/${PROJECT_NAME}/
+  DESTINATION share/${PROJECT_NAME}
 )
 
-# --- Package ---
+install(PROGRAMS
+  darp_bridge_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()
-
-

@@ -469,14 +469,15 @@ ROS_DOMAIN_ID=
     docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
    ros2 run tf2_tools view_frames"
 ```
 ```bash
-    docker cp swarmslam:/root/.ros/log/2026-04-03-19-14-43-263507-dan-ETBook-55617  ~/Swarm-SLAM/data/
+    docker cp swarmslam:frames_2026-04-27_23.04.22.pdf  ~/Swarm-SLAM/data/
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
-   source /opt/ros/jazzy/setup.bash; \
+   source /opt/ros/jazzy/setu0p.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    ls -la"
 ```
@@ -584,3 +585,50 @@ zenoh получилось запустить, но почему-то визуа
    export ROS_DOMAIN_ID=100 &&\
    ros2 run darp darp_node"
 ```
+
+# 19.04.26
+
+За несколько дней успешно запустилась darp node, но пока работает не совсем верно (ошибка запуска darp была в конфликте имен ros2 пакета и питон библиотеки darp - ros2 пакет переименован в darp_areas)
+
+Запускаем DARP через сервис
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.05, padding: 0.2, obstacle_dilation: 0.1, use_equal_portions: true, portions: []}\""
+```
+
+DARP работает исправно
+
+nav2 
+
+# 20.04.26
+
+Возможно, DARP обозначает начальные позиции роботов неверно, надо поизучать
+
+Добавлена nav_darp нода, пока в тестинге
+
+# 25.04.26
+
+nav2, darp step, anomaly detection, frontier exploration, heartbeat
+
+в аномалиях добавить вывод маркеров в рвиз (как /cslam/viz/cloudmarker)
+
+frontier - обвод контуров и нахождение позы открытой местности
+расстояние между роботов через позы (начинать по одному возможно)
+
+heartbeat - слушаем соседа и если не слышали долго, то считаем мертвыми
+
+# 27.04.26
+
+пофикшены многочисленные ошибки nav2 за счет неиспользуемых нод в nav2_bringup. 
+
+в итоге поменяно на список отдельных нужных нод (пока минимально нужный список),
+также добавлены в zenoh конфиги топики /tf для того, чтобы во всех доменах все знали о всех фреймах (тоже для нав2)
+
+сейчас проблема преобразования robot0_map и robot0_keyframe0 в виде:
+
+[controller_server-1] [ERROR] [1777331241.786831585] [tf_help]: Transform data too old when converting from robot0_map to robot0_keyframe0
+
+поменял у gazebo launch файла use_sim_time = false и в публикатора Path в DARP сделал так, чтобы timestamp у поз и пути в целом поменялись на время нынешнее, но, похоже, не то
