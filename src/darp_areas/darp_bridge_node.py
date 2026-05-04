@@ -7,10 +7,12 @@ import re
 import sys
 import threading
 import traceback
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -20,6 +22,7 @@ from nav_msgs.msg import OccupancyGrid, Path as NavPath
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker
 
@@ -113,6 +116,7 @@ class DarpBridgeNode(Node):
         self.declare_parameter("default_resolution", 0.05)
         self.declare_parameter("default_padding", 1.0)
         self.declare_parameter("default_obstacle_dilation", 0.10)
+        self.declare_parameter("obstacle_threshold", 0)
         self.declare_parameter("sleep_after_run", True)
         self.declare_parameter("publish_unknown_outside", False)
 
@@ -124,15 +128,15 @@ class DarpBridgeNode(Node):
         self.default_resolution = float(self.get_parameter("default_resolution").value)
         self.default_padding = float(self.get_parameter("default_padding").value)
         self.default_obstacle_dilation = float(self.get_parameter("default_obstacle_dilation").value)
+        self.obstacle_threshold = float(self.get_parameter("obstacle_threshold").value)
         self.sleep_after_run = bool(self.get_parameter("sleep_after_run").value)
         self.publish_unknown_outside = bool(self.get_parameter("publish_unknown_outside").value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.latest_robot_marker: Dict[int, Marker] = {}
+        self.accumulated_markers: Dict[int, List[Marker]] = defaultdict(list)
         self.latest_robot_pose: List[Optional[Pose]] = [None] * self.robot_count
-        self.latest_robot_pose_frame: List[Optional[str]] = [None] * self.robot_count
         self.latest_lock = threading.Lock()
 
         self.min_x = 1000
@@ -169,13 +173,18 @@ class DarpBridgeNode(Node):
 
         self.area_pubs = []
         self.route_pubs = []
+        qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
         for i in range(self.robot_count):
             ns = f"{self.robot_prefix}{i}"
             self.area_pubs.append(
-                self.create_publisher(OccupancyGrid, f"/{ns}/darp/area", 10)
+                self.create_publisher(OccupancyGrid, f"/{ns}/darp/area", qos)
             )
             self.route_pubs.append(
-                self.create_publisher(NavPath, f"/{ns}/darp/route", 10)
+                self.create_publisher(NavPath, f"/{ns}/darp/route", qos)
             )
 
         self.get_logger().info(
@@ -204,6 +213,12 @@ class DarpBridgeNode(Node):
         if not source_frame or source_frame == target_frame:
             return deepcopy(pose)
 
+        if not self.tf_buffer.can_transform(target_frame, source_frame, Time(seconds=0), timeout=rclpy.duration.Duration(seconds=1.0)):
+            self.get_logger().warn(
+                f"TF not ready yet: {source_frame} -> {target_frame}"
+            )
+            return None
+
         T = self._lookup_transform_matrix(target_frame, source_frame)
         v = np.array([pose.position.x, pose.position.y, pose.position.z, 1.0], dtype=np.float64)
         w = T @ v
@@ -214,45 +229,28 @@ class DarpBridgeNode(Node):
         out.position.z = float(w[2])
         return out
 
-    def _marker_points_in_frame_old(self, marker: Marker, target_frame: str) -> np.ndarray:
-        if not marker.points:
-            return np.zeros((0, 2), dtype=np.float64)
-
-        source_frame = marker.header.frame_id or target_frame
-        try:
-            T = self._lookup_transform_matrix(target_frame, source_frame)
-        except Exception as exc:
-            self.get_logger().warn(
-                f"TF lookup failed {source_frame} -> {target_frame}: {exc}. "
-                f"Using raw marker points."
-            )
-            T = np.eye(4, dtype=np.float64)
-
-        pts = []
-        for p in marker.points:
-            v = np.array([p.x, p.y, p.z, 1.0], dtype=np.float64)
-            w = T @ v
-            pts.append((float(w[0]), float(w[1])))
-        return np.asarray(pts, dtype=np.float64)
-
-
     def _marker_points_in_frame(self, marker: Marker, target_frame: str) -> np.ndarray:
         if not marker.points:
             return np.zeros((0, 2), dtype=np.float64)
 
         source_frame = marker.header.frame_id or target_frame
 
+        if not self.tf_buffer.can_transform(target_frame, source_frame, Time(seconds=0), timeout=rclpy.duration.Duration(seconds=3.0)):
+            self.get_logger().warn(
+                f"TF not ready yet: {source_frame} -> {target_frame}"
+            )
+            return None
+
         try:
             T = self._lookup_transform_matrix(target_frame, source_frame)
         except Exception as exc:
             self.get_logger().warn(
-                f"TF lookup failed {source_frame} -> {target_frame}: {exc}. Using raw marker points."
+                f"TF lookup failed {source_frame} -> {target_frame}: {exc}. "
+                f"Skipping this marker."
             )
-            T = np.eye(4, dtype=np.float64)
+            return np.zeros((0, 2), dtype=np.float64)
 
         pts = []
-
-        Z_THRESHOLD = 0
 
         for p in marker.points:
             v = np.array([p.x, p.y, p.z, 1.0], dtype=np.float64)
@@ -263,49 +261,49 @@ class DarpBridgeNode(Node):
             if w[0] > self.max_x: self.max_x = w[0]
             if w[1] > self.max_y: self.max_y = w[1]
 
-            if w[2] < Z_THRESHOLD:
+            # Считаем препятствием только то, что выше порога по z
+            if w[2] < self.obstacle_threshold:
                 continue
 
             pts.append((float(w[0]), float(w[1])))
 
-
         return np.asarray(pts, dtype=np.float64)
+
     # ------------------------ PoseGraph handling ------------------------
 
     def _extract_latest_pose_from_pose_graph(self, msg: PoseGraph) -> tuple[Optional[Pose], Optional[str]]:
-        frame_id = f"robot{int(msg.origin_robot_id)}_map"
-
         values = list(getattr(msg, "values", []))
         if values:
             latest = max(values, key=lambda v: int(v.key.keyframe_id))
-            return deepcopy(latest.pose), frame_id
-
-        edges = list(getattr(msg, "edges", []))
-        if not edges:
+            return deepcopy(latest.pose), f"robot{latest.key.robot_id}_map"
+        else:
             return None, None
+        #edges = list(getattr(msg, "edges", []))
+        #if not edges:
+        #    return None, None
 
-        edges = sorted(
-            edges,
-            key=lambda e: (int(e.key_from.keyframe_id), int(e.key_to.keyframe_id)),
-        )
+        #edges = sorted(
+        #    edges,
+        #    key=lambda e: (int(e.key_from.keyframe_id), int(e.key_to.keyframe_id)),
+        #)
 
-        x, y, yaw = 0.0, 0.0, 0.0
-        for e in edges:
-            dx = float(e.measurement.position.x)
-            dy = float(e.measurement.position.y)
-            dyaw = yaw_from_quat(e.measurement.orientation)
-            c = math.cos(yaw)
-            s = math.sin(yaw)
-            x = x + c * dx - s * dy
-            y = y + s * dx + c * dy
-            yaw = yaw + dyaw
+        #x, y, yaw = 0.0, 0.0, 0.0
+        #for e in edges:
+        #    dx = float(e.measurement.position.x)
+        #    dy = float(e.measurement.position.y)
+        #    dyaw = yaw_from_quat(e.measurement.orientation)
+        #    c = math.cos(yaw)
+        #    s = math.sin(yaw)
+        #    x = x + c * dx - s * dy
+        #    y = y + s * dx + c * dy
+        #    yaw = yaw + dyaw
 
-        pose = Pose()
-        pose.position.x = x
-        pose.position.y = y
-        pose.position.z = 0.0
-        pose.orientation = quat_from_yaw(yaw)
-        return pose, frame_id
+        #pose = Pose()
+        #pose.position.x = x
+        #pose.position.y = y
+        #pose.position.z = 0.0
+        #pose.orientation = quat_from_yaw(yaw)
+        #return pose, frame_id
 
     # ------------------------ ROS callbacks ------------------------
 
@@ -318,7 +316,7 @@ class DarpBridgeNode(Node):
             return
 
         with self.latest_lock:
-            self.latest_robot_marker[robot_idx] = deepcopy(msg)
+            self.accumulated_markers[robot_idx].append(msg)
 
     def _pose_graph_cb(self, msg: PoseGraph) -> None:
         robot_idx = int(msg.robot_id)
@@ -329,14 +327,16 @@ class DarpBridgeNode(Node):
         if pose is None or frame_id is None:
             return
 
-        with self.latest_lock:
-            self.latest_robot_pose[robot_idx] = pose
-            self.latest_robot_pose_frame[robot_idx] = frame_id
+        transformed_pose = self._transform_pose_to_frame(pose, frame_id, self.frame_id)
 
-        #self.get_logger().info(
-        #    f"PoseGraph robot {robot_idx}: latest pose = "
-        #    f"({pose.position.x:.3f}, {pose.position.y:.3f}) in {frame_id}"
-        #)
+        with self.latest_lock:
+            if self.latest_robot_pose[robot_idx] != transformed_pose:
+                self.get_logger().info(
+                    f"PoseGraph robot {robot_idx}: latest pose stored in {self.frame_id} "
+                    f"= ({transformed_pose.position.x:.3f}, {transformed_pose.position.y:.3f})"
+                )
+            self.latest_robot_pose[robot_idx] = transformed_pose
+
 
     # ------------------------ Service ------------------------
 
@@ -348,9 +348,8 @@ class DarpBridgeNode(Node):
                 return response
 
             with self.latest_lock:
-                markers_copy = deepcopy(self.latest_robot_marker)
+                markers_copy = deepcopy(self.accumulated_markers)
                 poses_copy = deepcopy(self.latest_robot_pose)
-                pose_frames_copy = deepcopy(self.latest_robot_pose_frame)
 
             missing_markers = [i for i in range(self.robot_count) if i not in markers_copy]
             missing_poses = [i for i, p in enumerate(poses_copy) if p is None]
@@ -368,7 +367,7 @@ class DarpBridgeNode(Node):
             self.asleep = False
             self.worker_thread = threading.Thread(
                 target=self._run_darp_job,
-                args=(markers_copy, poses_copy, pose_frames_copy, request),
+                args=(poses_copy, request),
                 daemon=True,
             )
             self.worker_thread.start()
@@ -381,14 +380,12 @@ class DarpBridgeNode(Node):
 
     def _run_darp_job(
         self,
-        markers: Dict[int, Marker],
         poses: List[Optional[Pose]],
-        pose_frames: List[Optional[str]],
         request: WakeUp.Request,
     ) -> None:
         try:
-            grid = self._build_raster_grid(markers, request)
-            start_cells = self._resolve_start_cells(grid, poses, pose_frames)
+            grid = self._build_raster_grid(request)
+            start_cells = self._resolve_start_cells(grid, poses)
             portions = self._resolve_portions(request)
 
             obs_pos = np.flatnonzero(grid.occupancy.reshape(-1) > 0).astype(int).tolist()
@@ -413,7 +410,7 @@ class DarpBridgeNode(Node):
             if not getattr(planner, "DARP_success", False):
                 raise RuntimeError("DARP did not find a feasible partition.")
 
-            self._publish_result(grid, planner)
+            self._publish_result(grid, planner, start_cells)
             self.get_logger().info("DARP finished and topics were published.")
 
         except Exception as exc:
@@ -426,9 +423,8 @@ class DarpBridgeNode(Node):
     # ------------------------ Grid build ------------------------
 
     def _build_raster_grid(
-        self,
-        markers: Dict[int, Marker],
-        request: WakeUp.Request,
+            self,
+            request: WakeUp.Request,
     ) -> RasterGrid:
         resolution = float(request.resolution) if request.resolution > 0.0 else self.default_resolution
         padding = float(request.padding) if request.padding >= 0.0 else self.default_padding
@@ -439,29 +435,30 @@ class DarpBridgeNode(Node):
         )
 
         all_pts = []
-        for marker in markers.values():
-            pts = self._marker_points_in_frame(marker, self.frame_id)
-            if pts.shape[0] > 0:
-                all_pts.append(pts)
+        for chunk in self.accumulated_markers.values():
+            for marker in chunk:
+                pts = self._marker_points_in_frame(marker, self.frame_id)
+                if pts.shape[0] > 0:
+                    all_pts.append(pts)
 
         if not all_pts:
             raise RuntimeError("No usable points in received markers.")
 
         points_xy = np.vstack(all_pts)
 
-        #min_x = float(np.min(points_xy[:, 0]) - padding)
-        #max_x = float(np.max(points_xy[:, 0]) + padding)
-        #min_y = float(np.min(points_xy[:, 1]) - padding)
-        #max_y = float(np.max(points_xy[:, 1]) + padding)
+        min_x = float(self.min_x - padding)
+        max_x = float(self.max_x + padding)
+        min_y = float(self.min_y - padding)
+        max_y = float(self.max_y + padding)
 
-        cols = max(1, int(math.ceil((self.max_x - self.min_x) / resolution)) + 1)
-        rows = max(1, int(math.ceil((self.max_y - self.min_y) / resolution)) + 1)
+        cols = max(1, int(math.ceil((max_x - min_x) / resolution)) + 1)
+        rows = max(1, int(math.ceil((max_y - min_y) / resolution)) + 1)
 
         occ = np.zeros((rows, cols), dtype=np.uint8)
 
         for x, y in points_xy:
-            c = int((x - self.min_x) / resolution)
-            r = int((y - self.min_y) / resolution)
+            c = int((x - min_x) / resolution)
+            r = int((y - min_y) / resolution)
             if 0 <= r < rows and 0 <= c < cols:
                 occ[r, c] = 100
 
@@ -472,21 +469,22 @@ class DarpBridgeNode(Node):
             occ_bin = cv2.dilate(occ_bin, kernel, iterations=1)
             occ = (occ_bin > 0).astype(np.uint8) * 100
 
-        # Keep only the largest free component so DARP gets one connected free space.
-        free_mask = (occ == 0).astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(free_mask, connectivity=4)
-        if num_labels > 2:
-            counts = np.bincount(labels.reshape(-1))
-            counts[0] = 0
-            keep = int(np.argmax(counts))
-            free_keep = labels == keep
-            occ[~free_keep] = 100
+        #print("Here is occupancy grid: ", occ)
 
-        frame_id = next(iter(markers.values())).header.frame_id or self.frame_id
+        #free_mask = (occ == 0).astype(np.uint8)
+        #num_labels, labels = cv2.connectedComponents(free_mask, connectivity=4)
+        #if num_labels > 2:
+        #    counts = np.bincount(labels.reshape(-1))
+        #    counts[0] = 0
+        #    keep = int(np.argmax(counts))
+        #    free_keep = labels == keep
+        #    occ[~free_keep] = 100
+
+        frame_id = self.frame_id
         return RasterGrid(
             occupancy=occ,
-            origin_x=self.min_x,
-            origin_y=self.min_y,
+            origin_x=min_x,
+            origin_y=min_y,
             resolution=resolution,
             frame_id=frame_id,
         )
@@ -508,10 +506,9 @@ class DarpBridgeNode(Node):
         return portions
 
     def _resolve_start_cells(
-        self,
-        grid: RasterGrid,
-        poses: List[Optional[Pose]],
-        pose_frames: List[Optional[str]],
+            self,
+            grid: RasterGrid,
+            poses: List[Optional[Pose]],
     ) -> List[int]:
         starts: List[int] = []
 
@@ -519,11 +516,8 @@ class DarpBridgeNode(Node):
             if pose is None:
                 raise RuntimeError(f"Missing pose for robot {i}")
 
-            source_frame = pose_frames[i] or grid.frame_id
-            pose_in_grid = self._transform_pose_to_frame(pose, source_frame, grid.frame_id)
-
-            x = float(pose_in_grid.position.x)
-            y = float(pose_in_grid.position.y)
+            x = float(pose.position.x)
+            y = float(pose.position.y)
 
             c = int((x - grid.origin_x) / grid.resolution)
             r = int((y - grid.origin_y) / grid.resolution)
@@ -550,13 +544,18 @@ class DarpBridgeNode(Node):
 
     # ------------------------ Publishing ------------------------
 
-    def _publish_result(self, grid: RasterGrid, planner: object) -> None:
+    def _publish_result(self, grid: RasterGrid, planner: object, start_cells: List[int]) -> None:
         assignment = np.array(planner.darp_instance.A, dtype=np.int32)
         drone_no = int(planner.darp_instance.droneNo)
 
+        #print("planner = ", planner.best_case.paths)
+        #print("drone_no = ", drone_no)
+        #print("assignment = ", assignment)
+        #print("grid = ", grid)
+
         for robot_idx in range(self.robot_count):
             area_msg = self._make_area_msg(grid, assignment, robot_idx, drone_no)
-            route_msg = self._make_route_msg(grid, planner.best_case.paths[robot_idx])
+            route_msg = self._make_route_msg(grid, planner.best_case.paths[robot_idx], start_cells[robot_idx])
             self.area_pubs[robot_idx].publish(area_msg)
             self.route_pubs[robot_idx].publish(route_msg)
 
@@ -590,10 +589,29 @@ class DarpBridgeNode(Node):
         msg.data = data.reshape(-1).tolist()
         return msg
 
+    def _path_sequence_to_vertices(
+            self,
+            path_sequence: Sequence[Tuple[int, int, int, int]],
+    ) -> List[Tuple[int, int]]:
+        if not path_sequence:
+            return []
+
+        vertices: List[Tuple[int, int]] = [
+            (int(path_sequence[0][0]), int(path_sequence[0][1]))
+        ]
+
+        for seg in path_sequence:
+            b = (int(seg[2]), int(seg[3]))
+            if b != vertices[-1]:
+                vertices.append(b)
+
+        return vertices
+
     def _make_route_msg(
-        self,
-        grid: RasterGrid,
-        path_sequence: Sequence[Tuple[int, int, int, int]],
+            self,
+            grid: RasterGrid,
+            path_sequence: Sequence[Tuple[int, int, int, int]],
+            start_cell: int,
     ) -> NavPath:
         msg = NavPath()
         msg.header = Header()
@@ -601,7 +619,7 @@ class DarpBridgeNode(Node):
         msg.header.frame_id = grid.frame_id
 
         poses: List[PoseStamped] = []
-
+        print(f"{start_cell} START")
         def add_rc(rr: int, cc: int) -> None:
             p = PoseStamped()
             p.header.frame_id = grid.frame_id
@@ -610,16 +628,37 @@ class DarpBridgeNode(Node):
             p.pose.position.y = float(grid.origin_y + (rr + 0.5) * grid.resolution)
             p.pose.position.z = 0.0
             p.pose.orientation.w = 1.0
+            print(f"{rr},{cc}", end="->")
             poses.append(p)
 
-        last = None
-        for seg in path_sequence:
-            a = (int(seg[0]), int(seg[1]))
-            b = (int(seg[2]), int(seg[3]))
-            if last != a:
-                add_rc(*a)
-            add_rc(*b)
-            last = b
+        start_rc = linear_to_rc(start_cell, grid.occupancy.shape[1])
+        route_vertices = self._path_sequence_to_vertices(path_sequence)
+
+        if not route_vertices:
+            add_rc(*start_rc)
+            msg.poses = poses
+            return msg
+
+        if start_rc in route_vertices:
+            start_idx = route_vertices.index(start_rc)
+            print(f"{start_cell} NICE")
+        else:
+            start_idx = min(
+                range(len(route_vertices)),
+                key=lambda i: (route_vertices[i][0] - start_rc[0]) ** 2 + (route_vertices[i][1] - start_rc[1]) ** 2,
+            )
+            start_rc = route_vertices[start_idx]
+            print(f"{start_cell} BAD")
+
+        rotated_route = route_vertices[start_idx:] + route_vertices[:start_idx]
+
+        # 1) старт робота
+        add_rc(*start_rc)
+
+        # 2) дальше уже точки DARP-маршрута в правильном порядке
+        for rr, cc in rotated_route:
+            if (rr, cc) != start_rc:
+                add_rc(rr, cc)
 
         msg.poses = poses
         return msg

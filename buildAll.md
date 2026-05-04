@@ -117,6 +117,10 @@
    ros2 run darp_areas darp_bridge_node.py"
 ```
 
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/cslam_visualization"
+```
+
 Копируем cslam_visualization в докер
 ```bash
     docker cp ~/Swarm-SLAM/src/cslam_visualization/ swarmslam:/Swarm-SLAM/src/cslam_visualization/
@@ -174,14 +178,6 @@
    ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot1_map robot0_map"
 ```
 
-Запускаем static publisher
-```bash
-    docker exec -it swarmslam bash -c "\
-   source /opt/ros/jazzy/setup.bash; \
-   export ROS_DOMAIN_ID=100 &&\
-   ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 robot0_keyframe0 robot0_map"
-```
-
 Обновляем конфиги для cslam_experiments
 ```bash
     docker cp ~/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5 swarmslam:/Swarm-SLAM/src/cslam_experiments/config/zenoh/zenoh_cslam.json5 &&\
@@ -212,7 +208,7 @@
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    export ROS_DOMAIN_ID=100 &&\
-   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.8, padding: 0.1, obstacle_dilation: 0.2, use_equal_portions: true, portions: []}\""
+   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.7, padding: 0, obstacle_dilation: 0, use_equal_portions: true, portions: []}\""
 ```
 
 ```bash

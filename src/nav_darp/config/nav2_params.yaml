@@ -36,9 +36,18 @@ controller_server:
       yaw_goal_tolerance: 0.25
       stateful: True
 
+    path_handler_plugins: [ "path_handler" ]
+
+    path_handler:
+      plugin: "nav2_controller::SimplePathHandler"
+      max_robot_pose_search_dist: 50.0
+      prune_distance: 5.0
+      reject_unit_path: False
+      enforce_path_inversion: False
+
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: False
+      debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
       max_vel_x: 0.26
@@ -123,8 +132,8 @@ local_costmap:
       robot_radius: 0.22
       resolution: 0.05
       rolling_window: true
-      width: 3
-      height: 3
+      width: 5
+      height: 5
       plugins: ["voxel_layer", "inflation_layer"]
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"

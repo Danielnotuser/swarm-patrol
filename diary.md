@@ -473,7 +473,7 @@ ROS_DOMAIN_ID=
    ros2 run tf2_tools view_frames"
 ```
 ```bash
-    docker cp swarmslam:frames_2026-04-27_23.04.22.pdf  ~/Swarm-SLAM/data/
+    docker cp swarmslam:frames_2026-04-28_14.03.21.pdf  ~/Swarm-SLAM/data/
 ```
 ```bash
     docker exec -it swarmslam bash -c "\
@@ -632,3 +632,22 @@ heartbeat - слушаем соседа и если не слышали долг
 [controller_server-1] [ERROR] [1777331241.786831585] [tf_help]: Transform data too old when converting from robot0_map to robot0_keyframe0
 
 поменял у gazebo launch файла use_sim_time = false и в публикатора Path в DARP сделал так, чтобы timestamp у поз и пути в целом поменялись на время нынешнее, но, похоже, не то
+
+# 29.04.26
+
+выявлена, собственно, первопричина того, что система не работала в одном домене: при перебросе /tf топиков по zenoh тоже не работает визуализация обоих роботов
+
+и со вчерашнего дня переписывается DARP, так как он использовал только последние маркеры поинтклаудов от каждого робота, а не все, 
+также сейчас проводится работа для соответсвия выходных фреймов для последующей навигации относительно robot0_map фрейма
+
+по nav_darp остановился на ошибке
+
+[controller_server-1] [ERROR] [1777479197.286140123] [r0.controller_server]: Resulting plan has 0 poses in it.
+
+хотя позы в /darp/route точно есть
+
+также добавлен черновой вариант anomaly detection node
+
+# 03.05.26
+
+докер пересобрать, нав2, аномалии, фронтиры, отказы
