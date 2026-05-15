@@ -115,7 +115,7 @@ class DarpBridgeNode(Node):
         self.declare_parameter("frame_id", "robot0_map")
         self.declare_parameter("default_resolution", 0.05)
         self.declare_parameter("default_padding", 1.0)
-        self.declare_parameter("default_obstacle_dilation", 0)
+        self.declare_parameter("default_obstacle_dilation", 0.10)
         self.declare_parameter("obstacle_threshold", 0)
         self.declare_parameter("sleep_after_run", True)
         self.declare_parameter("publish_unknown_outside", False)
@@ -124,10 +124,10 @@ class DarpBridgeNode(Node):
         self.robot_prefix = str(self.get_parameter("robot_prefix").value)
         self.marker_topic = str(self.get_parameter("marker_topic").value)
         self.pose_graph_topic = str(self.get_parameter("pose_graph_topic").value)
-        self.default_frame_id = str(self.get_parameter("frame_id").value)
+        self.frame_id = str(self.get_parameter("frame_id").value)
         self.default_resolution = float(self.get_parameter("default_resolution").value)
         self.default_padding = float(self.get_parameter("default_padding").value)
-        self.default_obstacle_dilation = int(self.get_parameter("default_obstacle_dilation").value)
+        self.default_obstacle_dilation = float(self.get_parameter("default_obstacle_dilation").value)
         self.obstacle_threshold = float(self.get_parameter("obstacle_threshold").value)
         self.sleep_after_run = bool(self.get_parameter("sleep_after_run").value)
         self.publish_unknown_outside = bool(self.get_parameter("publish_unknown_outside").value)
@@ -186,9 +186,6 @@ class DarpBridgeNode(Node):
             self.route_pubs.append(
                 self.create_publisher(NavPath, f"/{ns}/darp/route", qos)
             )
-
-        self.full_area_pub = self.create_publisher(OccupancyGrid, f"/darp/full_area", qos)
-
 
         self.get_logger().info(
             f"Listening to {self.marker_topic} and {self.pose_graph_topic}. "
@@ -330,12 +327,12 @@ class DarpBridgeNode(Node):
         if pose is None or frame_id is None:
             return
 
-        transformed_pose = self._transform_pose_to_frame(pose, frame_id, self.default_frame_id)
+        transformed_pose = self._transform_pose_to_frame(pose, frame_id, self.frame_id)
 
         with self.latest_lock:
             if self.latest_robot_pose[robot_idx] != transformed_pose:
                 self.get_logger().info(
-                    f"PoseGraph robot {robot_idx}: latest pose stored in {self.default_frame_id} "
+                    f"PoseGraph robot {robot_idx}: latest pose stored in {self.frame_id} "
                     f"= ({transformed_pose.position.x:.3f}, {transformed_pose.position.y:.3f})"
                 )
             self.latest_robot_pose[robot_idx] = transformed_pose
@@ -431,11 +428,16 @@ class DarpBridgeNode(Node):
     ) -> RasterGrid:
         resolution = float(request.resolution) if request.resolution > 0.0 else self.default_resolution
         padding = float(request.padding) if request.padding >= 0.0 else self.default_padding
+        obstacle_dilation = (
+            float(request.obstacle_dilation)
+            if request.obstacle_dilation >= 0.0
+            else self.default_obstacle_dilation
+        )
 
         all_pts = []
         for chunk in self.accumulated_markers.values():
             for marker in chunk:
-                pts = self._marker_points_in_frame(marker, self.default_frame_id)
+                pts = self._marker_points_in_frame(marker, self.frame_id)
                 if pts.shape[0] > 0:
                     all_pts.append(pts)
 
@@ -460,14 +462,12 @@ class DarpBridgeNode(Node):
             if 0 <= r < rows and 0 <= c < cols:
                 occ[r, c] = 100
 
-        dil_cells = request.obstacle_dilation if request.obstacle_dilation >= 0 else self.default_obstacle_dilation
+        dil_cells = int(round(obstacle_dilation / resolution))
         if dil_cells > 0:
             kernel = np.ones((2 * dil_cells + 1, 2 * dil_cells + 1), dtype=np.uint8)
             occ_bin = (occ > 0).astype(np.uint8) * 255
             occ_bin = cv2.dilate(occ_bin, kernel, iterations=1)
-            original_mask = (occ == 100)
-            occ = np.where(occ_bin > 0, 100, 0).astype(np.uint8)
-            occ[(occ_bin > 0) & (~original_mask)] = 50
+            occ = (occ_bin > 0).astype(np.uint8) * 100
 
         #print("Here is occupancy grid: ", occ)
 
@@ -480,7 +480,7 @@ class DarpBridgeNode(Node):
             free_keep = labels == keep
             occ[~free_keep] = 100
 
-        frame_id = self.default_frame_id
+        frame_id = self.frame_id
         return RasterGrid(
             occupancy=occ,
             origin_x=min_x,
@@ -546,6 +546,7 @@ class DarpBridgeNode(Node):
 
     def _publish_result(self, grid: RasterGrid, planner: object, start_cells: List[int]) -> None:
         assignment = np.array(planner.darp_instance.A, dtype=np.int32)
+        drone_no = int(planner.darp_instance.droneNo)
 
         #print("planner = ", planner.best_case.paths)
         #print("drone_no = ", drone_no)
@@ -553,26 +554,22 @@ class DarpBridgeNode(Node):
         #print("grid = ", grid)
 
         for robot_idx in range(self.robot_count):
-            robot_frame_id = f"robot{robot_idx}_map"
-            area_msg = self._make_area_msg(grid, assignment, robot_idx, robot_frame_id)
-            route_msg = self._make_route_msg(grid, planner.best_case.paths[robot_idx], start_cells[robot_idx], robot_frame_id)
+            area_msg = self._make_area_msg(grid, assignment, robot_idx, drone_no)
+            route_msg = self._make_route_msg(grid, planner.best_case.paths[robot_idx], start_cells[robot_idx])
             self.area_pubs[robot_idx].publish(area_msg)
             self.route_pubs[robot_idx].publish(route_msg)
-
-        full_area_msg = self._make_full_area_msg(grid, robot_frame_id)
-        self.full_area_pub.publish(full_area_msg)
 
     def _make_area_msg(
         self,
         grid: RasterGrid,
         assignment: np.ndarray,
         robot_idx: int,
-        frame_id: str,
+        drone_no: int,
     ) -> OccupancyGrid:
         msg = OccupancyGrid()
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = frame_id
+        msg.header.frame_id = grid.frame_id
 
         msg.info.resolution = float(grid.resolution)
         msg.info.width = int(grid.occupancy.shape[1])
@@ -589,27 +586,6 @@ class DarpBridgeNode(Node):
             pass
 
         msg.data = data.reshape(-1).tolist()
-        return msg
-
-    def _make_full_area_msg(
-        self,
-        grid: RasterGrid,
-        frame_id: str,
-    ) -> OccupancyGrid:
-        msg = OccupancyGrid()
-        msg.header = Header()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = frame_id
-
-        msg.info.resolution = float(grid.resolution)
-        msg.info.width = int(grid.occupancy.shape[1])
-        msg.info.height = int(grid.occupancy.shape[0])
-        msg.info.origin.position.x = float(grid.origin_x)
-        msg.info.origin.position.y = float(grid.origin_y)
-        msg.info.origin.position.z = 0.0
-        msg.info.origin.orientation.w = 1.0
-
-        msg.data = grid.occupancy.reshape(-1).tolist()
         return msg
 
     def _path_sequence_to_vertices(
@@ -635,12 +611,11 @@ class DarpBridgeNode(Node):
             grid: RasterGrid,
             path_sequence: Sequence[Tuple[int, int, int, int]],
             start_cell: int,
-            frame_id: str,
     ) -> NavPath:
         msg = NavPath()
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = frame_id
+        msg.header.frame_id = grid.frame_id
 
         # Разрешение для удвоенной STC-сетки
         route_resolution = grid.resolution / 2.0
@@ -657,7 +632,7 @@ class DarpBridgeNode(Node):
         if not route_vertices:
             # пустой путь → только старт
             p = PoseStamped()
-            p.header.frame_id = frame_id
+            p.header.frame_id = grid.frame_id
             p.header.stamp = msg.header.stamp
             p.pose.position.x, p.pose.position.y = indices_to_xy(*start_rc)
             p.pose.position.z = 0.0
@@ -703,7 +678,7 @@ class DarpBridgeNode(Node):
                     # Добавляем только если не дублирует предыдущую
                     if math.hypot(interp_x - prev_x, interp_y - prev_y) > min_step_m:
                         p = PoseStamped()
-                        p.header.frame_id = frame_id
+                        p.header.frame_id = grid.frame_id
                         p.header.stamp = msg.header.stamp
                         p.pose.position.x = interp_x
                         p.pose.position.y = interp_y
@@ -714,7 +689,7 @@ class DarpBridgeNode(Node):
 
             filtered_vertices.append((rr, cc))
             p = PoseStamped()
-            p.header.frame_id = frame_id
+            p.header.frame_id = grid.frame_id
             p.header.stamp = msg.header.stamp
             p.pose.position.x = x
             p.pose.position.y = y
@@ -733,7 +708,7 @@ class DarpBridgeNode(Node):
             last_r, last_c = rotated[-1]
             x, y = indices_to_xy(last_r, last_c)
             p = PoseStamped()
-            p.header.frame_id = frame_id
+            p.header.frame_id = grid.frame_id
             p.header.stamp = msg.header.stamp
             p.pose.position.x = x
             p.pose.position.y = y

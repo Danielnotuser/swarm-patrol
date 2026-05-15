@@ -1,191 +1,140 @@
 #!/usr/bin/env python3
 
-import rclpy
-import numpy as np
-from rclpy.node import Node
-from rclpy.time import Time
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from tf2_ros import Buffer, TransformListener
-from tf2_ros import TransformException
-from geometry_msgs.msg import Pose, PoseStamped, Quaternion
-from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from nav_msgs.msg import Path
-from copy import deepcopy
 import time
 
-def quat_to_rot_matrix(q: Quaternion) -> np.ndarray:
-    x, y, z, w = q.x, q.y, q.z, q.w
-    xx, yy, zz = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from builtin_interfaces.msg import Time
+from lifecycle_msgs.srv import GetState
+from rosgraph_msgs.msg import Clock
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+import tf2_ros
+import tf2_geometry_msgs
 
-    return np.array(
-        [
-            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
-        ],
-        dtype=np.float64,
-    )
 
 class DARPPathFollower(Node):
-    """
-    Нода для одного робота.
-    Принимает параметр ROBOT_ID (целое число) и формирует namespace = r{ROBOT_ID}.
-    Подписывается на топик /<namespace>/darp/route и отправляет путь в Nav2.
-    """
-
     def __init__(self):
         super().__init__('darp_path_follower')
 
-        # --- Параметры ---
-        self.declare_parameter('ROBOT_ID', 0)
-        #self.declare_parameter('use_sim_time', False)
+        self.declare_parameter('robot_id', 0)
+        self.declare_parameter("global_frame", "robot0_map")
 
-        self.robot_id = self.get_parameter('ROBOT_ID').get_parameter_value().integer_value
+        self.robot_id = self.get_parameter('robot_id').get_parameter_value().integer_value
+        self.global_frame = str(self.get_parameter("global_frame").value)
 
-        # Namespace: r0, r1, ...
         self.namespace = f'r{self.robot_id}'
+        self._last_clock = Time()
 
-        # --- Nav2 navigator ---
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.create_subscription(Clock, f'/{self.namespace}/clock', self._clock_cb, 10)
+
         self.navigator = BasicNavigator(namespace=self.namespace)
-        self.get_logger().info(f'Navigator инициализирован для namespace: "{self.namespace}"')
+        self._wait_for_lifecycle_nodes()
+        self.get_logger().info('Nav2 is ready.')
 
-        # --- Подписка на путь ---
         topic_name = f'/{self.namespace}/darp/route'
-        qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL
-        )
+        qos = QoSProfile(depth=10)
         self.sub = self.create_subscription(Path, topic_name, self.path_callback, qos)
-        self.get_logger().info(f'Ожидание пути на топике: {topic_name}')
+        self.get_logger().info(f'Waiting for path on: {topic_name}')
 
-        # --- Состояние ---
         self.is_navigating = False
         self.timer = None
 
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+    def _wait_for_lifecycle_nodes(self) -> None:
+        nodes = ['controller_server', 'smoother_server', 'velocity_smoother']
+        for node_name in nodes:
+            node_service = f'/{self.namespace}/{node_name}/get_state'
+            self.get_logger().info(f'Waiting for {node_name}...')
+            state_client = self.create_client(GetState, node_service)
+            while not state_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info(f'{node_service} not available, waiting...')
+            req = GetState.Request()
+            state = 'unknown'
+            while state != 'active':
+                future = state_client.call_async(req)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+                if future.result() is not None:
+                    state = future.result().current_state.label
+                if state != 'active':
+                    time.sleep(2)
+            self.get_logger().info(f'{node_name} is active.')
 
-    # ------------------------ TF helpers ------------------------
+        self.get_logger().info('All lifecycle nodes are active.')
+        self.get_logger().info('Waiting 5 seconds for system stabilization...')
+        time.sleep(5)
+        self.get_logger().info('System ready.')
 
-    def _lookup_transform_matrix(self, target_frame: str, source_frame: str) -> np.ndarray:
-        if not source_frame or source_frame == target_frame:
-            return np.eye(4, dtype=np.float64)
+    def _clock_cb(self, msg: Clock) -> None:
+        self._last_clock = msg.clock
 
-        tf = self.tf_buffer.lookup_transform(target_frame, source_frame, Time(seconds=0))
-        R = quat_to_rot_matrix(tf.transform.rotation)
-        t = tf.transform.translation
-
-        T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = R
-        T[0, 3] = float(t.x)
-        T[1, 3] = float(t.y)
-        T[2, 3] = float(t.z)
-        return T
-
-    def _try_transform_pose(self, pose, source_frame, target_frame) -> Pose:
+    def _transform_pose(self, pose: PoseStamped, from_frame: str) -> PoseStamped:
         try:
-            tf = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
-        except TransformException as ex:
-            self.get_logger().warn(f"TF not ready yet: {source_frame} -> {target_frame}: {ex}")
-            return None
-
-        T = self._lookup_transform_matrix(target_frame, source_frame)
-        v = np.array([pose.position.x, pose.position.y, pose.position.z, 1.0], dtype=np.float64)
-        w = T @ v
-
-        out = deepcopy(pose)
-        out.position.x = float(w[0])
-        out.position.y = float(w[1])
-        out.position.z = float(w[2])
-        return out
-
-    def _transform_pose_to_frame(self, pose: Pose, source_frame: str, target_frame: str) -> Pose:
-        if not source_frame or source_frame == target_frame:
-            return deepcopy(pose)
-
-        while not self.tf_buffer.can_transform(target_frame, source_frame, Time(seconds=0), timeout=rclpy.duration.Duration(seconds=5.0)):
-            self.get_logger().warn(
-                f"TF not ready yet: {source_frame} -> {target_frame}"
-            )
-
-        T = self._lookup_transform_matrix(target_frame, source_frame)
-        v = np.array([pose.position.x, pose.position.y, pose.position.z, 1.0], dtype=np.float64)
-        w = T @ v
-
-        out = deepcopy(pose)
-        out.position.x = float(w[0])
-        out.position.y = float(w[1])
-        out.position.z = float(w[2])
-        return out
+            latest = rclpy.time.Time(seconds=0)
+            transform = self.tf_buffer.lookup_transform(self.global_frame, from_frame, latest)
+            result = tf2_geometry_msgs.do_transform_pose(pose, transform)
+            result.header.stamp = self._last_clock
+            return result
+        except Exception as e:
+            self.get_logger().warn(f'Transform failed: {e}')
+            return pose
 
     def path_callback(self, path_msg: Path):
-        """Обработчик входящего пути."""
         if self.is_navigating:
-            self.get_logger().warn('Робот уже выполняет путь. Новый путь проигнорирован.')
+            self.get_logger().warn('Robot already navigating. New path ignored.')
             return
 
         if len(path_msg.poses) == 0:
-            self.get_logger().warn('Получен пустой путь. Игнорируем.')
+            self.get_logger().warn('Empty path. Ignored.')
             return
 
         self.get_logger().info(
-            f'Получен путь из {len(path_msg.poses)} точек. '
-            f'frame_id: {path_msg.header.frame_id}'
-        )
+            f'Received path with {len(path_msg.poses)} poses in frame "{path_msg.header.frame_id}"')
 
-        # Актуализируем позы и путь сам с нынешним временем
-        path_msg.header.stamp = self.get_clock().now().to_msg()
+        stamp = self._last_clock
 
-        #for pose in path_msg.poses:
-        #    pose.header.stamp = path_msg.header.stamp
+        if path_msg.header.frame_id != self.global_frame:
+            self.get_logger().warn(f'Path frame "{path_msg.header.frame_id}" != "{self.global_frame}", transforming')
+            for pose in path_msg.poses:
+                pose.header.stamp = stamp
+                transformed = self._transform_pose(
+                    pose, path_msg.header.frame_id)
+                pose.pose = transformed.pose
+                pose.header.frame_id = self.global_frame
+                pose.header.stamp = stamp
+            path_msg.header.frame_id = self.global_frame
 
-        self.get_logger().info(f"Start pose in robot0_map frame --> {path_msg.poses[0].pose}")
+        path_msg.header.stamp = stamp
 
-        transformed_pose = self._try_transform_pose(
-            path_msg.poses[0].pose,
-            "robot0_map",
-            f"robot{self.robot_id}_current_pose"
-        )
+        self.get_logger().info(f"First pose in {self.global_frame}: {path_msg.poses[0].pose}")
 
-        if transformed_pose is None:
-            self.get_logger().warn("TF ещё не готов. Путь пока не отправляю.")
-            return
-
-        self.get_logger().info(f"Start pose in robot{self.robot_id}_current_pose frame --> {transformed_pose}")
-
-        # Запускаем движение
         self.navigator.followPath(path_msg)
         self.is_navigating = True
 
-        # Создаём таймер мониторинга (если ещё не создан)
         if self.timer is None:
             self.timer = self.create_timer(0.5, self.monitor_navigation)
 
     def monitor_navigation(self):
-        """Периодически проверяет, завершена ли задача."""
         if not self.is_navigating:
             return
-
         if not self.navigator.isTaskComplete():
             return
 
         result = self.navigator.getResult()
-
         if result == TaskResult.SUCCEEDED:
-            self.get_logger().info('Путь пройден успешно!')
+            self.get_logger().info('Path completed successfully!')
         elif result == TaskResult.CANCELED:
-            self.get_logger().warn('Навигация была отменена.')
+            self.get_logger().warn('Navigation cancelled.')
         elif result == TaskResult.FAILED:
-            self.get_logger().error('Навигация провалена!')
+            self.get_logger().error('Navigation failed!')
         else:
-            self.get_logger().info(f'Задача завершена с результатом: {result}')
+            self.get_logger().info(f'Task result: {result}')
 
         self.is_navigating = False
-
-        # Останавливаем таймер
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None
@@ -193,13 +142,9 @@ class DARPPathFollower(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-
     node = DARPPathFollower()
-
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -67,8 +67,8 @@ local_costmap:
       use_sim_time: False
       update_frequency: 20.0
       publish_frequency: 3.0
-      global_frame: robot0_map
-      robot_base_frame: r0/laser_frame
+      global_frame: robot1_map
+      robot_base_frame: r1/laser_frame
       robot_radius: 0.22
       resolution: 0.05
       rolling_window: true
@@ -87,7 +87,7 @@ local_costmap:
         mark_threshold: 3
         observation_sources: pointcloud
         pointcloud:
-          topic: /r0/pointcloud_real
+          topic: /r1/pointcloud_real
           data_type: "PointCloud2"
           transform_tolerance: 3
           max_obstacle_height: 1.5
@@ -120,8 +120,8 @@ global_costmap:
       use_sim_time: False
       update_frequency: 1.0
       publish_frequency: 0.5
-      global_frame: robot0_map
-      robot_base_frame: r0/laser_frame
+      global_frame: robot1_map
+      robot_base_frame: r1/laser_frame
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
@@ -129,7 +129,7 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
-        map_topic: /r0/darp/area
+        map_topic: /r1/darp/area
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0

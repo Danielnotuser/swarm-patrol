@@ -7,7 +7,7 @@ find_package(ament_cmake_python REQUIRED)
 
 # Устанавливаем Python-скрипт (ноду) в lib/nav_darp
 install(PROGRAMS
-  darp_path_follower.py
+  darp_path_follower.py realtime_pointcloud.py odom_to_map.py static_tf_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

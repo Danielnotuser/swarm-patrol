@@ -10,20 +10,18 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, Quaternion
+from geometry_msgs.msg import Pose, PoseStamped, Quaternion
 from nav_msgs.msg import OccupancyGrid
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
-from anomaly_detection.msg import AnomalyDetected
+from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformListener
 
-try:
-    from tf2_geometry_msgs import do_transform_pose_stamped  # type: ignore
-except Exception:  # pragma: no cover
-    do_transform_pose_stamped = None
+from cslam_common_interfaces.msg import PoseGraph
+from anomaly_detection.msg import AnomalyDetected
 
 
 def quat_to_rot_matrix(q: Quaternion) -> np.ndarray:
@@ -70,7 +68,6 @@ def bresenham_cells(r0: int, c0: int, r1: int, c1: int) -> List[Tuple[int, int]]
     sr = 1 if r0 < r1 else -1
     sc = 1 if c0 < c1 else -1
     err = dc - dr
-
     r, c = r0, c0
     while True:
         cells.append((r, c))
@@ -86,12 +83,6 @@ def bresenham_cells(r0: int, c0: int, r1: int, c1: int) -> List[Tuple[int, int]]
     return cells
 
 
-def parse_robot_index(text: str) -> Optional[int]:
-    import re
-    m = re.search(r"robot(\d+)", text or "")
-    return int(m.group(1)) if m else None
-
-
 @dataclass
 class GridInfo:
     msg: OccupancyGrid
@@ -102,7 +93,7 @@ class GridInfo:
 class AnomalyEvent:
     robot_id: int
     anomaly_id: int
-    anomaly_type: str  # appearance | disappearance
+    anomaly_type: str
     cell_r: int
     cell_c: int
     anomaly_x: float
@@ -114,175 +105,176 @@ class AnomalyEvent:
 
 
 class AnomalyDetectionNode(Node):
-    """
-    Compares a robot DARP occupancy grid with live lidar pointclouds.
-
-    The report describes anomaly detection as:
-    - comparing the current lidar data with the reference occupancy grid;
-    - transforming pointcloud data to the global frame with tf;
-    - treating points that fall into free cells as anomaly candidates;
-    - signaling only if the anomaly is stable for K frames and exceeds M points;
-    - publishing an anomaly message with id, timestamp, pose, type, robot_id.  # report-based fields. fileciteturn6file0
-    """
-
     def __init__(self) -> None:
         super().__init__("anomaly_detection_node")
         self.cb_group = ReentrantCallbackGroup()
 
-        self.declare_parameter("robot_count", 2)
         self.declare_parameter("robot_prefix", "r")
-        self.declare_parameter("grid_topic_template", "/{robot}/darp/area")
-        self.declare_parameter("pointcloud_topic_template", "/{robot}/pointcloud")
-        self.declare_parameter("pose_topic_template", "/{robot}/cslam/current_pose_estimate")
-        self.declare_parameter("base_frame_template", "robot{robot}_base_link")
+        self.declare_parameter("robot_id", 0)
+        self.declare_parameter("grid_topic", "/darp/full_area")
         self.declare_parameter("anomaly_topic", "/anomaly_detected")
+        self.declare_parameter("marker_topic", "/anomaly_markers")
+        self.declare_parameter("pose_topic", "/cslam/viz/pose_graph")
         self.declare_parameter("occupied_threshold", 50)
         self.declare_parameter("z_min", 0.10)
         self.declare_parameter("z_max", 2.00)
         self.declare_parameter("min_points_per_cell", 3)
         self.declare_parameter("stable_frames", 3)
-        self.declare_parameter("publish_json", True)
         self.declare_parameter("cooldown_sec", 2.0)
 
-        self.robot_count = int(self.get_parameter("robot_count").value)
         self.robot_prefix = str(self.get_parameter("robot_prefix").value)
-        self.grid_topic_template = str(self.get_parameter("grid_topic_template").value)
-        self.pointcloud_topic_template = str(self.get_parameter("pointcloud_topic_template").value)
-        self.pose_topic_template = str(self.get_parameter("pose_topic_template").value)
-        self.base_frame_template = str(self.get_parameter("base_frame_template").value)
+        self.robot_id = int(self.get_parameter("robot_id").value)
+        self.grid_topic = str(self.get_parameter("grid_topic").value)
         self.anomaly_topic = str(self.get_parameter("anomaly_topic").value)
+        self.marker_topic = str(self.get_parameter("marker_topic").value)
+        self.pose_topic = str(self.get_parameter("pose_topic").value)
         self.occupied_threshold = int(self.get_parameter("occupied_threshold").value)
         self.z_min = float(self.get_parameter("z_min").value)
         self.z_max = float(self.get_parameter("z_max").value)
         self.min_points_per_cell = int(self.get_parameter("min_points_per_cell").value)
         self.stable_frames = int(self.get_parameter("stable_frames").value)
-        self.publish_json = bool(self.get_parameter("publish_json").value)
         self.cooldown_sec = float(self.get_parameter("cooldown_sec").value)
+
+        self.namespace = f"{self.robot_prefix}{self.robot_id}"
+        self.base_frame = f"robot{self.robot_id}_current_pose"
+
+        self.cloud_topic = f"/{self.namespace}/pointcloud"
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.lock = threading.Lock()
-        self.latest_grids: Dict[int, GridInfo] = {}
-        self.latest_pose: Dict[int, PoseStamped] = {}
-        self.latest_pose_frame: Dict[int, str] = {}
+        self.latest_grid: Optional[GridInfo] = None
+        self.latest_pose: Optional[Pose] = None
+        self.latest_pose_frame: str = ""
 
-        self.appearance_streak: Dict[int, Dict[Tuple[int, int], int]] = defaultdict(dict)
-        self.disappearance_streak: Dict[int, Dict[Tuple[int, int], int]] = defaultdict(dict)
-        self.last_published: Dict[Tuple[int, str, int, int], float] = {}
+        self.appearance_streak: Dict[Tuple[int, int], int] = {}
+        self.disappearance_streak: Dict[Tuple[int, int], int] = {}
+        self.last_published: Dict[Tuple[str, int, int], float] = {}
         self.next_anomaly_id = 1
 
         self.anomaly_pub = self.create_publisher(AnomalyDetected, self.anomaly_topic, 10)
+        self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
 
-        self.grid_subs = []
-        self.pointcloud_subs = []
-        self.pose_subs = []
-        for i in range(self.robot_count):
-            robot_ns = f"{self.robot_prefix}{i}"
-            grid_topic = self.grid_topic_template.format(robot=robot_ns, id=i)
-            cloud_topic = self.pointcloud_topic_template.format(robot=robot_ns, id=i)
-            pose_topic = self.pose_topic_template.format(robot=robot_ns, id=i)
-
-            self.grid_subs.append(
-                self.create_subscription(
-                    OccupancyGrid,
-                    grid_topic,
-                    lambda msg, rid=i: self._grid_cb(rid, msg),
-                    10,
-                    callback_group=self.cb_group,
-                )
-            )
-            self.pointcloud_subs.append(
-                self.create_subscription(
-                    PointCloud2,
-                    cloud_topic,
-                    lambda msg, rid=i: self._cloud_cb(rid, msg),
-                    10,
-                    callback_group=self.cb_group,
-                )
-            )
-            self.pose_subs.append(
-                self.create_subscription(
-                    PoseStamped,
-                    pose_topic,
-                    lambda msg, rid=i: self._pose_cb(rid, msg),
-                    10,
-                    callback_group=self.cb_group,
-                )
-            )
+        self.grid_sub = self.create_subscription(
+            OccupancyGrid, self.grid_topic, self._grid_cb, 10,
+            callback_group=self.cb_group)
+        self.cloud_sub = self.create_subscription(
+            PointCloud2, self.cloud_topic, self._cloud_cb, 10,
+            callback_group=self.cb_group)
+        self.pose_sub = self.create_subscription(
+            PoseGraph, self.pose_topic, self._pose_graph_cb, 10,
+            callback_group=self.cb_group)
 
         self.get_logger().info(
-            f"Anomaly detector started. Grid topics: {self.grid_topic_template}, clouds: {self.pointcloud_topic_template}"
-        )
+            f"Started. grid: {self.grid_topic}, cloud: {self.cloud_topic}, "
+            f"pose: {self.pose_topic}, markers: {self.marker_topic}")
 
-    # ----------------------- callbacks -----------------------
-
-    def _grid_cb(self, robot_id: int, msg: OccupancyGrid) -> None:
+    def _grid_cb(self, msg: OccupancyGrid) -> None:
         stamp_key = (int(msg.header.stamp.sec), int(msg.header.stamp.nanosec))
         with self.lock:
-            prev = self.latest_grids.get(robot_id)
+            prev = self.latest_grid
             prev_key = prev.stamp_key if prev is not None else None
-            self.latest_grids[robot_id] = GridInfo(msg=deepcopy(msg), stamp_key=stamp_key)
-
-            # reset history if this robot published a new grid
+            self.latest_grid = GridInfo(msg=deepcopy(msg), stamp_key=stamp_key)
             if prev_key != stamp_key:
-                self.appearance_streak[robot_id].clear()
-                self.disappearance_streak[robot_id].clear()
+                self.appearance_streak.clear()
+                self.disappearance_streak.clear()
 
-    def _pose_cb(self, robot_id: int, msg: PoseStamped) -> None:
-        with self.lock:
-            self.latest_pose[robot_id] = deepcopy(msg)
-            self.latest_pose_frame[robot_id] = msg.header.frame_id or ""
+    def _extract_latest_pose(self, msg: PoseGraph) -> Optional[Pose]:
+        values = list(getattr(msg, "values", []))
+        for v in values:
+            if int(v.key.robot_id) == self.robot_id:
+                return deepcopy(v.pose)
+        return None
 
-    def _cloud_cb(self, robot_id: int, msg: PointCloud2) -> None:
+    def _pose_graph_cb(self, msg: PoseGraph) -> None:
+        pose = self._extract_latest_pose(msg)
+        if pose is not None:
+            with self.lock:
+                self.latest_pose = pose
+                self.latest_pose_frame = f"robot{self.robot_id}_map"
+
+    def _robot_pose_in_grid(self, grid_frame: str) -> Optional[PoseStamped]:
+        T_grid_from_base = transform_matrix_from_tf(self.tf_buffer, grid_frame, self.base_frame)
+        if T_grid_from_base is not None:
+            pose = PoseStamped()
+            pose.header.frame_id = grid_frame
+            pose.header.stamp = self.get_clock().now().to_msg()
+            x, y, z = transform_point(T_grid_from_base, (0.0, 0.0, 0.0))
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = z
+            pose.pose.orientation.w = 1.0
+            return pose
+
         with self.lock:
-            grid_info = self.latest_grids.get(robot_id)
-            pose_msg = self.latest_pose.get(robot_id)
-            pose_frame = self.latest_pose_frame.get(robot_id, "")
+            pose_msg = self.latest_pose
+            pose_frame = self.latest_pose_frame
+
+        if pose_msg is None:
+            return None
+
+        if pose_frame and pose_frame != grid_frame:
+            T_grid_from_pose = transform_matrix_from_tf(self.tf_buffer, grid_frame, pose_frame)
+            if T_grid_from_pose is not None:
+                p = PoseStamped()
+                p.header.frame_id = grid_frame
+                p.header.stamp = self.get_clock().now().to_msg()
+                x, y, z = transform_point(
+                    T_grid_from_pose,
+                    (float(pose_msg.position.x), float(pose_msg.position.y), float(pose_msg.position.z)),
+                )
+                p.pose.position.x = x
+                p.pose.position.y = y
+                p.pose.position.z = z
+                p.pose.orientation = deepcopy(pose_msg.orientation)
+                return p
+
+        result = PoseStamped()
+        result.header.frame_id = pose_frame
+        result.header.stamp = self.get_clock().now().to_msg()
+        result.pose = deepcopy(pose_msg)
+        return result
+
+    def _cloud_cb(self, msg: PointCloud2) -> None:
+        self.get_logger().info("I am in cloud callback.")
+
+        with self.lock:
+            grid_info = self.latest_grid
 
         if grid_info is None:
-            self.get_logger().debug(f"Robot {robot_id}: no occupancy grid yet.")
+            self.get_logger().debug("No occupancy grid yet.")
             return
 
         grid = grid_info.msg
-        grid_frame = grid.header.frame_id or "map"
-        cloud_frame = msg.header.frame_id or ""
+        grid_frame = grid.header.frame_id
+        cloud_frame = msg.header.frame_id
 
-        # Robot pose in the grid frame.
-        base_frame = self.base_frame_template.format(robot=f"{self.robot_prefix}{robot_id}", id=robot_id)
-        robot_pose_in_grid = self._robot_pose_in_grid(robot_id, grid_frame, base_frame, pose_msg, pose_frame)
+        robot_pose_in_grid = self._robot_pose_in_grid(grid_frame)
         if robot_pose_in_grid is None:
             self.get_logger().warn(
-                f"Robot {robot_id}: cannot determine robot pose in frame '{grid_frame}', skipping scan."
-            )
+                f"Cannot determine robot pose in frame '{grid_frame}', skipping scan.")
             return
 
         T_grid_from_cloud = transform_matrix_from_tf(self.tf_buffer, grid_frame, cloud_frame)
         if T_grid_from_cloud is None:
             self.get_logger().warn(
-                f"Robot {robot_id}: TF missing for {cloud_frame} -> {grid_frame}, skipping scan."
-            )
+                f"TF missing for {cloud_frame} -> {grid_frame}, skipping scan.")
             return
 
         robot_rc = self._world_to_cell(grid, robot_pose_in_grid.pose.position.x, robot_pose_in_grid.pose.position.y)
         if robot_rc is None:
-            self.get_logger().warn(f"Robot {robot_id}: robot pose outside grid bounds, skipping scan.")
+            self.get_logger().warn("Robot pose outside grid bounds, skipping scan.")
             return
 
         appearance_hits: Dict[Tuple[int, int], int] = defaultdict(int)
         disappearance_hits: Dict[Tuple[int, int], int] = defaultdict(int)
 
-        points_in_grid: List[Tuple[float, float, float]] = []
         for pt in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
             x_g, y_g, z_g = transform_point(T_grid_from_cloud, (float(pt[0]), float(pt[1]), float(pt[2])))
             if z_g < self.z_min or z_g > self.z_max:
                 continue
-            points_in_grid.append((x_g, y_g, z_g))
 
-        if not points_in_grid:
-            return
-
-        for x_g, y_g, z_g in points_in_grid:
             hit_rc = self._world_to_cell(grid, x_g, y_g)
             if hit_rc is None:
                 continue
@@ -299,58 +291,10 @@ class AnomalyDetectionNode(Node):
                     if v is not None and v >= self.occupied_threshold:
                         disappearance_hits[(rr, cc)] += 1
 
-        self._update_and_publish(robot_id, grid, robot_pose_in_grid, appearance_hits, disappearance_hits)
-
-    # ----------------------- core logic -----------------------
-
-    def _robot_pose_in_grid(
-        self,
-        robot_id: int,
-        grid_frame: str,
-        base_frame: str,
-        pose_msg: Optional[PoseStamped],
-        pose_frame: str,
-    ) -> Optional[PoseStamped]:
-        T_grid_from_base = transform_matrix_from_tf(self.tf_buffer, grid_frame, base_frame)
-        if T_grid_from_base is not None:
-            pose = PoseStamped()
-            pose.header.frame_id = grid_frame
-            pose.header.stamp = self.get_clock().now().to_msg()
-            x, y, z = transform_point(T_grid_from_base, (0.0, 0.0, 0.0))
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = z
-            pose.pose.orientation.w = 1.0
-            return pose
-
-        if pose_msg is None:
-            return None
-
-        if pose_frame and pose_frame != grid_frame:
-            T_grid_from_pose = transform_matrix_from_tf(self.tf_buffer, grid_frame, pose_frame)
-            if T_grid_from_pose is not None:
-                p = PoseStamped()
-                p.header.frame_id = grid_frame
-                p.header.stamp = self.get_clock().now().to_msg()
-                x, y, z = transform_point(
-                    T_grid_from_pose,
-                    (
-                        float(pose_msg.pose.position.x),
-                        float(pose_msg.pose.position.y),
-                        float(pose_msg.pose.position.z),
-                    ),
-                )
-                p.pose.position.x = x
-                p.pose.position.y = y
-                p.pose.position.z = z
-                p.pose.orientation = deepcopy(pose_msg.pose.orientation)
-                return p
-
-        return deepcopy(pose_msg)
+        self._update_and_publish(grid, robot_pose_in_grid, appearance_hits, disappearance_hits)
 
     def _update_and_publish(
         self,
-        robot_id: int,
         grid: OccupancyGrid,
         robot_pose: PoseStamped,
         appearance_hits: Dict[Tuple[int, int], int],
@@ -359,27 +303,24 @@ class AnomalyDetectionNode(Node):
         now_sec = float(self.get_clock().now().nanoseconds) / 1e9
 
         self._update_streaks_and_publish_type(
-            robot_id=robot_id,
             grid=grid,
             robot_pose=robot_pose,
             hits=appearance_hits,
-            streaks=self.appearance_streak[robot_id],
+            streaks=self.appearance_streak,
             anomaly_type="appearance",
             now_sec=now_sec,
         )
         self._update_streaks_and_publish_type(
-            robot_id=robot_id,
             grid=grid,
             robot_pose=robot_pose,
             hits=disappearance_hits,
-            streaks=self.disappearance_streak[robot_id],
+            streaks=self.disappearance_streak,
             anomaly_type="disappearance",
             now_sec=now_sec,
         )
 
     def _update_streaks_and_publish_type(
         self,
-        robot_id: int,
         grid: OccupancyGrid,
         robot_pose: PoseStamped,
         hits: Dict[Tuple[int, int], int],
@@ -395,13 +336,11 @@ class AnomalyDetectionNode(Node):
             if evidence_count < self.min_points_per_cell:
                 streaks[cell] = 0
                 continue
-
             streaks[cell] = int(streaks.get(cell, 0)) + 1
-
             if streaks[cell] < self.stable_frames:
                 continue
 
-            cooldown_key = (robot_id, anomaly_type, cell[0], cell[1])
+            cooldown_key = (anomaly_type, cell[0], cell[1])
             last_t = self.last_published.get(cooldown_key, -1e9)
             if now_sec - last_t < self.cooldown_sec:
                 continue
@@ -410,7 +349,7 @@ class AnomalyDetectionNode(Node):
             event_y = float(grid.info.origin.position.y + (cell[0] + 0.5) * grid.info.resolution)
 
             event = AnomalyEvent(
-                robot_id=robot_id,
+                robot_id=self.robot_id,
                 anomaly_id=self.next_anomaly_id,
                 anomaly_type=anomaly_type,
                 cell_r=cell[0],
@@ -426,7 +365,52 @@ class AnomalyDetectionNode(Node):
             self.last_published[cooldown_key] = now_sec
             self._publish_event(event)
 
-    # ----------------------- helpers -----------------------
+    def _publish_event(self, event: AnomalyEvent) -> None:
+        msg = AnomalyDetected()
+        msg.id = int(event.anomaly_id)
+        msg.timestamp.sec = int(event.stamp_sec)
+        msg.timestamp.nanosec = int(event.stamp_nanosec)
+        msg.pose.position.x = float(event.anomaly_x)
+        msg.pose.position.y = float(event.anomaly_y)
+        msg.pose.position.z = 0.0
+        msg.pose.orientation.w = 1.0
+        msg.type = str(event.anomaly_type)
+        msg.robot_id = int(event.robot_id)
+
+        self.anomaly_pub.publish(msg)
+        self.get_logger().warn(
+            f"Anomaly: robot={event.robot_id} type={event.anomaly_type} "
+            f"cell=({event.cell_r},{event.cell_c}) id={event.anomaly_id}")
+
+        is_appearance = event.anomaly_type == "appearance"
+        sphere = Marker()
+        sphere.header.frame_id = event.frame_id
+        sphere.header.stamp = self.get_clock().now().to_msg()
+        sphere.ns = "anomaly"
+        sphere.id = int(event.anomaly_id)
+        sphere.type = Marker.SPHERE
+        sphere.action = Marker.ADD
+        sphere.pose.position.x = float(event.anomaly_x)
+        sphere.pose.position.y = float(event.anomaly_y)
+        sphere.pose.position.z = 0.2
+        sphere.pose.orientation.w = 1.0
+        sphere.scale.x = 0.3
+        sphere.scale.y = 0.3
+        sphere.scale.z = 0.3
+        if is_appearance:
+            sphere.color.r = 1.0
+            sphere.color.g = 0.0
+            sphere.color.b = 0.0
+        else:
+            sphere.color.r = 0.0
+            sphere.color.g = 0.0
+            sphere.color.b = 1.0
+        sphere.color.a = 0.8
+        sphere.lifetime = rclpy.duration.Duration(seconds=0).to_msg()
+
+        markers = MarkerArray()
+        markers.markers.append(sphere)
+        self.marker_pub.publish(markers)
 
     def _cell_value(self, grid: OccupancyGrid, r: int, c: int) -> Optional[int]:
         if r < 0 or c < 0 or r >= grid.info.height or c >= grid.info.width:
@@ -446,25 +430,10 @@ class AnomalyDetectionNode(Node):
             return r, c
         return None
 
-    def _publish_event(self, event: AnomalyEvent) -> None:
-        msg = AnomalyDetected()
-        msg.id = int(event.anomaly_id)
-        msg.timestamp.sec = int(event.stamp_sec)
-        msg.timestamp.nanosec = int(event.stamp_nanosec)
-        msg.pose.position.x = float(event.anomaly_x)
-        msg.pose.position.y = float(event.anomaly_y)
-        msg.pose.position.z = 0.0
-        msg.pose.orientation.w = 1.0
-        msg.type = str(event.anomaly_type)
-        msg.robot_id = int(event.robot_id)
-
-        self.anomaly_pub.publish(msg)
-        self.get_logger().warn(
-            f"Anomaly detected: robot={event.robot_id} type={event.anomaly_type} cell=({event.cell_r},{event.cell_c}) id={event.anomaly_id}"
-        )
-
 
 def main() -> None:
+    import signal
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     rclpy.init()
     node = AnomalyDetectionNode()
     try:

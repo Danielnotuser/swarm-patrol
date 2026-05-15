@@ -11,8 +11,9 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.actions import IncludeLaunchDescription
 
 def spawn_robots(context, *args, **kwargs):
+    package_name = 'diff_drive_robot'
     max_nb_robots = int(LaunchConfiguration('max_nb_robots').perform(context))
-    world = LaunchConfiguration('world').perform(context)
+    world_path = os.path.join(get_package_share_directory(package_name), 'worlds', LaunchConfiguration('world').perform(context))
     package_dir = get_package_share_directory('diff_drive_robot')
     urdf_xacro_path = os.path.join(package_dir, 'urdf', 'robot.xacro')
     bridge_config = os.path.join(package_dir, 'config', 'gz_bridge.yaml')
@@ -24,7 +25,7 @@ def spawn_robots(context, *args, **kwargs):
         PythonLaunchDescriptionSource([os.path.join(
             get_package_share_directory('ros_gz_sim'), 'launch', 'gz_sim.launch.py'
         )]),
-        launch_arguments={'gz_args': ['-r -v1 ', world], 'on_exit_shutdown': 'true'}.items()
+        launch_arguments={'gz_args': ['-r -v1 ', world_path], 'on_exit_shutdown': 'true'}.items()
     )
     actions.append(gazebo)
 
@@ -78,11 +79,9 @@ def spawn_robots(context, *args, **kwargs):
 
 def generate_launch_description():
     package_name = 'diff_drive_robot'
-    world = LaunchConfiguration('world')
     rviz = LaunchConfiguration('rviz')
-    world_path = os.path.join(get_package_share_directory(package_name), 'worlds', 'obstacles.world')
 
-    declare_world = DeclareLaunchArgument('world', default_value=world_path)
+    declare_world = DeclareLaunchArgument('world', default_value='office.world')
     declare_rviz = DeclareLaunchArgument('rviz', default_value='False')
     declare_max_robots = DeclareLaunchArgument('max_nb_robots', default_value='2')
 
