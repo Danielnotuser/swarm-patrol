@@ -30,7 +30,7 @@ from ament_index_python.packages import get_package_share_directory
 from tf2_ros import Buffer, TransformListener
 
 from cslam_common_interfaces.msg import PoseGraph
-from darp_areas.srv import WakeUp
+from darp_areas.msg import WakeUp
 
 #os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 #os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -117,7 +117,6 @@ class DarpBridgeNode(Node):
         self.declare_parameter("default_padding", 1.0)
         self.declare_parameter("default_obstacle_dilation", 0)
         self.declare_parameter("obstacle_threshold", 0)
-        self.declare_parameter("sleep_after_run", True)
         self.declare_parameter("publish_unknown_outside", False)
 
         self.robot_count = int(self.get_parameter("robot_count").value)
@@ -129,7 +128,6 @@ class DarpBridgeNode(Node):
         self.default_padding = float(self.get_parameter("default_padding").value)
         self.default_obstacle_dilation = int(self.get_parameter("default_obstacle_dilation").value)
         self.obstacle_threshold = float(self.get_parameter("obstacle_threshold").value)
-        self.sleep_after_run = bool(self.get_parameter("sleep_after_run").value)
         self.publish_unknown_outside = bool(self.get_parameter("publish_unknown_outside").value)
 
         self.tf_buffer = Buffer()
@@ -146,7 +144,6 @@ class DarpBridgeNode(Node):
 
         self.run_lock = threading.Lock()
         self.worker_thread: Optional[threading.Thread] = None
-        self.asleep = True
 
         self.marker_sub = self.create_subscription(
             Marker,
@@ -164,15 +161,17 @@ class DarpBridgeNode(Node):
             callback_group=self.cb_group,
         )
 
-        self.wake_srv = self.create_service(
+        self.wake_sub = self.create_subscription(
             WakeUp,
             "/darp/wake_up",
-            self._wake_up_cb,
+            self._wake_up_topic_cb,
+            10,
             callback_group=self.cb_group,
         )
 
         self.area_pubs = []
         self.route_pubs = []
+        self.full_area_pubs = []
         qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -186,13 +185,13 @@ class DarpBridgeNode(Node):
             self.route_pubs.append(
                 self.create_publisher(NavPath, f"/{ns}/darp/route", qos)
             )
-
-        self.full_area_pub = self.create_publisher(OccupancyGrid, f"/darp/full_area", qos)
-
+            self.full_area_pubs.append(
+                self.create_publisher(OccupancyGrid, f"/{ns}/darp/full_area", qos)
+            )
 
         self.get_logger().info(
             f"Listening to {self.marker_topic} and {self.pose_graph_topic}. "
-            f"Waiting for /darp/wake_up."
+            f"Listening on /darp/wake_up (topic)."
         )
 
     # ------------------------ TF helpers ------------------------
@@ -341,61 +340,63 @@ class DarpBridgeNode(Node):
             self.latest_robot_pose[robot_idx] = transformed_pose
 
 
-    # ------------------------ Service ------------------------
+    # ------------------------ Wake-up (topic) ------------------------
 
-    def _wake_up_cb(self, request: WakeUp.Request, response: WakeUp.Response) -> WakeUp.Response:
+    def _wake_up_topic_cb(self, msg: WakeUp) -> None:
+        active_ids = list(msg.active_robot_ids)
+        if not active_ids:
+            self.get_logger().warn("Empty active_robot_ids, ignoring.")
+            return
+
         with self.run_lock:
             if self.worker_thread is not None and self.worker_thread.is_alive():
-                response.success = False
-                response.message = "DARP is already running."
-                return response
+                self.get_logger().warn("DARP already running, ignoring wake-up request.")
+                return
 
             with self.latest_lock:
                 markers_copy = deepcopy(self.accumulated_markers)
                 poses_copy = deepcopy(self.latest_robot_pose)
 
-            missing_markers = [i for i in range(self.robot_count) if i not in markers_copy]
-            missing_poses = [i for i, p in enumerate(poses_copy) if p is None]
+            missing_markers = [i for i in active_ids if i not in markers_copy]
+            has_pose = [i for i in active_ids if i < len(poses_copy) and poses_copy[i] is not None]
+            missing_poses = [i for i in active_ids if i not in has_pose]
 
             if missing_markers:
-                response.success = False
-                response.message = f"Missing cloudmarker for robots: {missing_markers}"
-                return response
+                self.get_logger().error(f"Missing cloudmarker for robots: {missing_markers}")
+                return
 
             if missing_poses:
-                response.success = False
-                response.message = f"Missing pose_graph poses for robots: {missing_poses}"
-                return response
+                self.get_logger().error(f"Missing pose_graph poses for robots: {missing_poses}")
+                return
 
-            self.asleep = False
             self.worker_thread = threading.Thread(
                 target=self._run_darp_job,
-                args=(poses_copy, request),
+                args=(poses_copy, msg, active_ids),
                 daemon=True,
             )
             self.worker_thread.start()
 
-        response.success = True
-        response.message = "DARP started."
-        return response
+        self.get_logger().info(f"DARP started for robots: {active_ids}")
 
     # ------------------------ DARP job ------------------------
 
     def _run_darp_job(
         self,
         poses: List[Optional[Pose]],
-        request: WakeUp.Request,
+        msg: WakeUp,
+        active_ids: List[int],
     ) -> None:
         try:
-            grid = self._build_raster_grid(request)
-            start_cells = self._resolve_start_cells(grid, poses)
-            portions = self._resolve_portions(request)
+            n_robots = len(active_ids)
+            grid = self._build_raster_grid(msg)
+            start_cells = self._resolve_start_cells(grid, poses, active_ids)
+            portions = self._resolve_portions(msg, n_robots)
 
             obs_pos = np.flatnonzero(grid.occupancy.reshape(-1) > 0).astype(int).tolist()
 
             self.get_logger().info(
                 f"Grid {grid.occupancy.shape[0]}x{grid.occupancy.shape[1]}, "
-                f"robots={self.robot_count}, obstacles={len(obs_pos)}"
+                f"robots={n_robots}, obstacles={len(obs_pos)}"
             )
             self.get_logger().info(f"Start cells: {start_cells}")
             self.get_logger().info(f"Portions: {portions}")
@@ -403,7 +404,7 @@ class DarpBridgeNode(Node):
             planner = MultiRobotPathPlanner(
                 grid.occupancy.shape[0],
                 grid.occupancy.shape[1],
-                not bool(request.use_equal_portions),
+                not bool(msg.use_equal_portions),
                 start_cells,
                 portions,
                 obs_pos,
@@ -413,24 +414,21 @@ class DarpBridgeNode(Node):
             if not getattr(planner, "DARP_success", False):
                 raise RuntimeError("DARP did not find a feasible partition.")
 
-            self._publish_result(grid, planner, start_cells)
+            self._publish_result(grid, planner, start_cells, active_ids)
             self.get_logger().info("DARP finished and topics were published.")
 
         except Exception as exc:
             self.get_logger().error(f"DARP run failed: {exc}")
             self.get_logger().error(traceback.format_exc())
-        finally:
-            if self.sleep_after_run:
-                self.asleep = True
 
     # ------------------------ Grid build ------------------------
 
     def _build_raster_grid(
             self,
-            request: WakeUp.Request,
+            msg: WakeUp,
     ) -> RasterGrid:
-        resolution = float(request.resolution) if request.resolution > 0.0 else self.default_resolution
-        padding = float(request.padding) if request.padding >= 0.0 else self.default_padding
+        resolution = float(msg.resolution) if msg.resolution > 0.0 else self.default_resolution
+        padding = float(msg.padding) if msg.padding >= 0.0 else self.default_padding
 
         all_pts = []
         for chunk in self.accumulated_markers.values():
@@ -460,7 +458,7 @@ class DarpBridgeNode(Node):
             if 0 <= r < rows and 0 <= c < cols:
                 occ[r, c] = 100
 
-        dil_cells = request.obstacle_dilation if request.obstacle_dilation >= 0 else self.default_obstacle_dilation
+        dil_cells = msg.obstacle_dilation if msg.obstacle_dilation >= 0 else self.default_obstacle_dilation
         if dil_cells > 0:
             kernel = np.ones((2 * dil_cells + 1, 2 * dil_cells + 1), dtype=np.uint8)
             occ_bin = (occ > 0).astype(np.uint8) * 255
@@ -491,14 +489,14 @@ class DarpBridgeNode(Node):
 
     # ------------------------ Portions / starts ------------------------
 
-    def _resolve_portions(self, request: WakeUp.Request) -> List[float]:
-        if bool(request.use_equal_portions):
-            return [1.0 / self.robot_count] * self.robot_count
+    def _resolve_portions(self, msg: WakeUp, n_robots: int) -> List[float]:
+        if bool(msg.use_equal_portions):
+            return [1.0 / n_robots] * n_robots
 
-        portions = list(request.portions)
-        if len(portions) != self.robot_count:
+        portions = list(msg.portions)
+        if len(portions) != n_robots:
             raise RuntimeError(
-                f"portions length must be {self.robot_count}, got {len(portions)}"
+                f"portions length must be {n_robots}, got {len(portions)}"
             )
         total = float(sum(portions))
         if abs(total - 1.0) > 1e-4:
@@ -509,10 +507,12 @@ class DarpBridgeNode(Node):
             self,
             grid: RasterGrid,
             poses: List[Optional[Pose]],
+            active_ids: List[int],
     ) -> List[int]:
         starts: List[int] = []
 
-        for i, pose in enumerate(poses):
+        for i in active_ids:
+            pose = poses[i]
             if pose is None:
                 raise RuntimeError(f"Missing pose for robot {i}")
 
@@ -544,23 +544,17 @@ class DarpBridgeNode(Node):
 
     # ------------------------ Publishing ------------------------
 
-    def _publish_result(self, grid: RasterGrid, planner: object, start_cells: List[int]) -> None:
+    def _publish_result(self, grid: RasterGrid, planner: object, start_cells: List[int], active_ids: List[int]) -> None:
         assignment = np.array(planner.darp_instance.A, dtype=np.int32)
 
-        #print("planner = ", planner.best_case.paths)
-        #print("drone_no = ", drone_no)
-        #print("assignment = ", assignment)
-        #print("grid = ", grid)
-
-        for robot_idx in range(self.robot_count):
+        for idx, robot_idx in enumerate(active_ids):
             robot_frame_id = f"robot{robot_idx}_map"
-            area_msg = self._make_area_msg(grid, assignment, robot_idx, robot_frame_id)
-            route_msg = self._make_route_msg(grid, planner.best_case.paths[robot_idx], start_cells[robot_idx], robot_frame_id)
+            area_msg = self._make_area_msg(grid, assignment, idx, robot_frame_id)
+            route_msg = self._make_route_msg(grid, planner.best_case.paths[idx], start_cells[idx], robot_frame_id)
+            full_area_msg = self._make_full_area_msg(grid, robot_frame_id)
             self.area_pubs[robot_idx].publish(area_msg)
             self.route_pubs[robot_idx].publish(route_msg)
-
-        full_area_msg = self._make_full_area_msg(grid, robot_frame_id)
-        self.full_area_pub.publish(full_area_msg)
+            self.full_area_pubs[robot_idx].publish(full_area_msg)
 
     def _make_area_msg(
         self,

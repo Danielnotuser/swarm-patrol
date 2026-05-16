@@ -13,6 +13,8 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 import tf2_ros
 import tf2_geometry_msgs
+from anomaly_detection.msg import AnomalyDetected
+from heartbeat_checker.msg import LostRobots
 
 
 class DARPPathFollower(Node):
@@ -40,10 +42,36 @@ class DARPPathFollower(Node):
         topic_name = f'/{self.namespace}/darp/route'
         qos = QoSProfile(depth=10)
         self.sub = self.create_subscription(Path, topic_name, self.path_callback, qos)
+        self.anomaly_sub = self.create_subscription(AnomalyDetected, '/anomaly_detection/anomaly', self._anomaly_cb, 10)
+        self.lost_sub = self.create_subscription(LostRobots, '/heartbeat_checker/lost', self._lost_cb, 10)
         self.get_logger().info(f'Waiting for path on: {topic_name}')
 
         self.is_navigating = False
         self.timer = None
+
+    def _anomaly_cb(self, msg: AnomalyDetected) -> None:
+        if not self.is_navigating:
+            return
+
+        self.get_logger().warn(
+            f"Anomaly detected from {msg.robot_id} robot at pose {msg.pose.position} cancelling navigation.")
+        self.navigator.cancelTask()
+        self.is_navigating = False
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+
+    def _lost_cb(self, msg: LostRobots) -> None:
+        if not self.is_navigating:
+            return
+
+        self.get_logger().warn(
+            f"Robot {msg.lost_robot_id} lost, cancelling navigation.")
+        self.navigator.cancelTask()
+        self.is_navigating = False
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
 
     def _wait_for_lifecycle_nodes(self) -> None:
         nodes = ['controller_server', 'smoother_server', 'velocity_smoother']

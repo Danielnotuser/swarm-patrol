@@ -50,7 +50,7 @@
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=0 &&\
-   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=two_rooms.world"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=world_pillar_forest.world"
 ```
 
 Запуск gazebo для 1-го робота
@@ -60,7 +60,7 @@
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=1 &&\
-   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=two_rooms.world"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=double_square_gap.world"
 ```
 
 Управляем 0-ым роботом:
@@ -91,6 +91,10 @@
 
 ```bash
     docker cp ~/Swarm-SLAM/src/darp_areas/src/multiRobotPathPlanner.py swarmslam:/Swarm-SLAM/src/darp_areas/src
+```
+
+```bash
+    docker cp ~/Swarm-SLAM/src/darp_areas/msg/ swarmslam:/Swarm-SLAM/src/darp_areas/msg
 ```
 
 ```bash
@@ -216,7 +220,16 @@
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    export ROS_DOMAIN_ID=100 &&\
-   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.5, padding: 0, obstacle_dilation: 1, use_equal_portions: true, portions: []}\""
+   ros2 service call /darp/wake_up darp_areas/srv/WakeUp \"{resolution: 0.5, padding: 0, obstacle_dilation: 1, use_equal_portions: true, portions: [], active_robot_ids: []}\""
+```
+
+Запускаем DARP через топик
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=100 &&\
+   ros2 topic pub --once /darp/wake_up darp_areas/msg/WakeUp \"{resolution: 0.5, padding: 0.0, obstacle_dilation: 1, use_equal_portions: true, portions: [], active_robot_ids: [0, 1]}\""
 ```
 
 ```bash
@@ -256,15 +269,15 @@
 ```
 
 ```bash
-    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/detector /Swarm-SLAM/install/detector"
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/anomaly_detection /Swarm-SLAM/src/anomaly_detection"
 ```
 
-Копируем detector
+Копируем anomaly_detection
 ```bash
-    docker cp ~/Swarm-SLAM/src/detector/ swarmslam:/Swarm-SLAM/src/detector
+    docker cp ~/Swarm-SLAM/src/anomaly_detection/ swarmslam:/Swarm-SLAM/src/anomaly_detection
 ```
 
-Собираем detector package
+Собираем anomaly_detection package
 ```bash
     docker exec -it swarmslam bash -c "\
     source /opt/ros/jazzy/setup.bash; 
@@ -277,6 +290,42 @@
    source /opt/ros/jazzy/setup.bash &&\
    source /Swarm-SLAM/install/setup.bash &&\
    export ROS_DOMAIN_ID=0 &&\
-   chmod +x /Swarm-SLAM/src/detector/anomaly_detection_node.py &&\
+   chmod +x /Swarm-SLAM/src/anomaly_detection/anomaly_detection_node.py &&\
    ros2 run anomaly_detection anomaly_detection_node.py"
+```
+
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/heartbeat_checker /Swarm-SLAM/src/heartbeat_checker"
+```
+
+Копируем heartbeat_checker
+```bash
+    docker cp ~/Swarm-SLAM/src/heartbeat_checker/ swarmslam:/Swarm-SLAM/src/heartbeat_checker
+```
+
+Собираем heartbeat_checker package
+```bash
+    docker exec -it swarmslam bash -c "\
+    source /opt/ros/jazzy/setup.bash; 
+    cd Swarm-SLAM && colcon build --packages-select heartbeat_checker"
+```
+
+Запускаем heartbeat_checker для 0 робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=0 &&\
+   chmod +x /Swarm-SLAM/src/heartbeat_checker/heartbeat_checker_node.py &&\
+   ros2 run heartbeat_checker heartbeat_checker_node.py"
+```
+
+Запускаем heartbeat_checker для 1 робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=1 &&\
+   chmod +x /Swarm-SLAM/src/heartbeat_checker/heartbeat_checker_node.py &&\
+   ros2 run heartbeat_checker heartbeat_checker_node.py --ros-args -p robot_id:=1"
 ```
