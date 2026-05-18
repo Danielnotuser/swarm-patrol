@@ -50,7 +50,7 @@
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=0 &&\
-   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=world_pillar_forest.world"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=two_rooms.world"
 ```
 
 Запуск gazebo для 1-го робота
@@ -60,7 +60,7 @@
    source /Swarm-SLAM/install/setup.bash;\
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=1 &&\
-   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=double_square_gap.world"
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=two_rooms.world"
 ```
 
 Управляем 0-ым роботом:

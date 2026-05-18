@@ -126,7 +126,7 @@ class AnomalyDetectionNode(Node):
         self.declare_parameter("z_max", 2.00)
         self.declare_parameter("min_points_per_cell", 10)
         self.declare_parameter("stable_frames", 10)
-        self.declare_parameter("cooldown_sec", 2.0)
+        self.declare_parameter("cooldown_sec", 1.0)
         self.declare_parameter("max_neighbors_for_disappearance", 0)
 
         self.robot_prefix = str(self.get_parameter("robot_prefix").value)
