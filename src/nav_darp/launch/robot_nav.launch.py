@@ -27,8 +27,11 @@ def launch_setup(context, *args, **kwargs):
     
     lifecycle_nodes = [
         'controller_server',
+        'planner_server',
+        'behavior_server',
         'smoother_server',
         'velocity_smoother',
+        'bt_navigator',
     ]
     
     param_substitutions = {'autostart': autostart_str}
@@ -84,13 +87,46 @@ def launch_setup(context, *args, **kwargs):
             remappings=remappings + [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')],
         ),
         Node(
+            package='nav2_planner',
+            executable='planner_server',
+            name='planner_server',
+            output='screen',
+            respawn=use_respawn,
+            respawn_delay=2.0,
+            parameters=[configured_params],
+            arguments=['--ros-args', '--log-level', log_level],
+            remappings=remappings,
+        ),
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            name='behavior_server',
+            output='screen',
+            respawn=use_respawn,
+            respawn_delay=2.0,
+            parameters=[configured_params],
+            arguments=['--ros-args', '--log-level', log_level],
+            remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
+        ),
+        Node(
+            package='nav2_bt_navigator',
+            executable='bt_navigator',
+            name='bt_navigator',
+            output='screen',
+            respawn=use_respawn,
+            respawn_delay=2.0,
+            parameters=[configured_params],
+            arguments=['--ros-args', '--log-level', log_level],
+            remappings=remappings,
+        ),
+        Node(
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
             name='lifecycle_manager_navigation',
             output='screen',
             arguments=['--ros-args', '--log-level', log_level],
-            parameters=[{'autostart': autostart_bool}, {'node_names': lifecycle_nodes}],
             remappings=remappings,
+            parameters=[{'autostart': autostart_bool}, {'node_names': lifecycle_nodes}],
         ),
         Node(
             package='nav_darp',

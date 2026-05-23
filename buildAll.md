@@ -329,3 +329,74 @@
    chmod +x /Swarm-SLAM/src/heartbeat_checker/heartbeat_checker_node.py &&\
    ros2 run heartbeat_checker heartbeat_checker_node.py --ros-args -p robot_id:=1"
 ```
+
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/frontier_exploration /Swarm-SLAM/src/frontier_exploration"
+```
+
+Копируем frontier_exploration
+```bash
+    docker cp ~/Swarm-SLAM/src/frontier_exploration/ swarmslam:/Swarm-SLAM/src/frontier_exploration
+```
+
+Собираем frontier_exploration package
+```bash
+    docker exec -it swarmslam bash -c "\
+    source /opt/ros/jazzy/setup.bash; 
+    cd Swarm-SLAM && colcon build --packages-select frontier_exploration"
+```
+
+Запускаем frontier_exploration для 0 робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=0 &&\
+   chmod +x /Swarm-SLAM/src/frontier_exploration/frontier_exploration/exploration_node.py &&\
+   ros2 run frontier_exploration exploration_node.py"
+```
+
+Запускаем frontier_exploration для 1 робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=1 &&\
+   chmod +x /Swarm-SLAM/src/frontier_exploration/frontier_exploration/exploration_node.py &&\
+   ros2 run frontier_exploration exploration_node.py --ros-args -p robot_id:=1 -p tf_static_topic:=/r1/tf_static"
+```
+
+Симулируем аномалию
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   ros2 topic pub --once /anomaly_detection/anomaly anomaly_detection/msg/AnomalyDetected \"{id: 0,timestamp: {sec: 1779498668, nanosec: 0},pose: {position: {x: 5.0, y: 5.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}},type: 'appearance',robot_id: 0}\""
+```
+
+Чистим фронтир грид
+```bash
+    docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash; \
+   export ROS_DOMAIN_ID=0 &&\
+   python3 -c \"
+import rclpy, std_msgs.msg, nav_msgs.msg, numpy as np
+rclpy.init()
+node = rclpy.create_node('grid_reset')
+pub = node.create_publisher(nav_msgs.msg.OccupancyGrid, '/frontier/grid', 10)
+import time; time.sleep(1)
+msg = nav_msgs.msg.OccupancyGrid()
+msg.header.stamp = node.get_clock().now().to_msg()
+msg.header.frame_id = 'robot0_map'
+msg.info.resolution = 0.1
+msg.info.width = 400; msg.info.height = 400
+msg.info.origin.position.x = -20.0; msg.info.origin.position.y = -20.0; msg.info.origin.orientation.w = 1.0
+msg.data = (np.full(160000, -1, dtype=np.int8)).tolist()
+pub.publish(msg)
+print('Grid reset published (all -1)')
+node.destroy_node()
+rclpy.shutdown()
+\""
+```
