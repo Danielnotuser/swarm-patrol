@@ -12,6 +12,7 @@ from rosgraph_msgs.msg import Clock
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Float32MultiArray
 import tf2_ros
 import tf2_geometry_msgs
 
@@ -44,7 +45,13 @@ class DARPPathFollower(Node):
         qos = QoSProfile(depth=10)
         self.sub = self.create_subscription(Path, topic_name, self.path_callback, qos)
         self.anomaly_sub = self.create_subscription(AnomalyDetected, '/anomaly_detection/anomaly', self._anomaly_cb, 10)
+        self._frontier_status_sub = self.create_subscription(
+            Float32MultiArray, '/frontier/frontier_status',
+            self._frontier_status_cb, 10
+        )
         self.get_logger().info(f'Listening for DARP routes on: {topic_name}')
+
+        self._frontier_done = False
 
         self.is_navigating = False
         self._current_path_len = 0
@@ -117,9 +124,21 @@ class DARPPathFollower(Node):
                 best_idx = i
         return best_idx
 
+    def _frontier_status_cb(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < 2 or int(msg.data[0]) != self.robot_id:
+            return
+        was = self._frontier_done
+        self._frontier_done = (msg.data[1] == 0.0)
+        if was != self._frontier_done:
+            self.get_logger().info(f'Frontier done? {self._frontier_done}')
+
     def path_callback(self, path_msg: Path):
         if len(path_msg.poses) == 0:
             self.get_logger().warn('Empty DARP path. Ignored.')
+            return
+
+        if not self._frontier_done:
+            self.get_logger().info('Frontier not done yet, ignoring DARP path')
             return
 
         path_hash = self._path_hash(path_msg)
@@ -210,6 +229,7 @@ class DARPPathFollower(Node):
         self.navigator.cancelTask()
         self.is_navigating = False
         self._current_path_hash = None
+        self._frontier_done = False
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None

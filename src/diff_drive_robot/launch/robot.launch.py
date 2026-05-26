@@ -69,7 +69,7 @@ def spawn_robots(context, *args, **kwargs):
             'ros2', 'run', 'ros_gz_sim', 'create',
             '-topic', f'/{ns}/robot_description',
             '-name', f'diff_bot_{i}',
-            '-x', '0.0',
+            '-x', '4.0',
             '-y', str(i * 1.0),
             '-z', '0.2'
         ]

@@ -11,7 +11,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from rclpy.duration import Duration
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import PointStamped
-from std_msgs.msg import Int32, UInt8MultiArray
+from std_msgs.msg import Float32MultiArray, Int32
 from lifecycle_msgs.srv import GetState
 from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import PoseStamped, TransformStamped
@@ -20,7 +20,6 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from tf2_msgs.msg import TFMessage
 import tf2_ros
 
-from cslam_common_interfaces.msg import PoseGraph
 from darp_areas.msg import WakeUp
 from anomaly_detection.msg import AnomalyDetected
 
@@ -43,11 +42,12 @@ class ExplorationNode(Node):
         self.declare_parameter('robot_id', 0)
         self.declare_parameter('robot_count', 2)
         self.declare_parameter('grid_resolution', 0.1)
-        self.declare_parameter('grid_size', 40.0)
+        self.declare_parameter('grid_width', 30.0)
+        self.declare_parameter('grid_height', 30.0)
         self.declare_parameter('z_min', 0.0)
         self.declare_parameter('cluster_dist', 1.5)
         self.declare_parameter('min_passage_width', 1.0)
-        self.declare_parameter('reservation_ttl', 30.0)
+        self.declare_parameter('sensor_range', 8.0)
         self.declare_parameter('frontier_timeout', 120.0)
         self.declare_parameter('exploration_period', 5.0)
         self.declare_parameter('dispersion_threshold', 4.0)
@@ -59,13 +59,14 @@ class ExplorationNode(Node):
         self.robot_id = self.get_parameter('robot_id').get_parameter_value().integer_value
         self.robot_count = self.get_parameter('robot_count').get_parameter_value().integer_value
         self.grid_resolution = float(self.get_parameter('grid_resolution').value)
-        self.grid_size = float(self.get_parameter('grid_size').value)
+        self.grid_width = float(self.get_parameter('grid_width').value)
+        self.grid_height = float(self.get_parameter('grid_height').value)
         self.z_min = float(self.get_parameter('z_min').value)
         self.cluster_dist = float(self.get_parameter('cluster_dist').value)
         self.min_passage_width = float(self.get_parameter('min_passage_width').value)
-        self.reservation_ttl = float(self.get_parameter('reservation_ttl').value)
         self.frontier_timeout = float(self.get_parameter('frontier_timeout').value)
         self.exploration_period = float(self.get_parameter('exploration_period').value)
+        self.sensor_range = float(self.get_parameter('sensor_range').value)
         self.dispersion_threshold = float(self.get_parameter('dispersion_threshold').value)
         self.coordination_exclusion_radius = float(self.get_parameter('coordination_exclusion_radius').value)
         self.input_base_frame = str(self.get_parameter('base_frame').value)
@@ -84,6 +85,7 @@ class ExplorationNode(Node):
         self._monitor_timer = None
         self._anomaly_mask: Optional[np.ndarray] = None
         self._anomaly_cleared_sent = False
+        self._start_time = self.get_clock().now()
 
         self.tf_buffer = tf2_ros.Buffer()
 
@@ -95,7 +97,7 @@ class ExplorationNode(Node):
         self.get_logger().info(f'Waiting for tf chain {self.nav_frame} -> {self.base_frame}...')
         deadline = self.get_clock().now() + STARTUP_TIMEOUT
         last_log = self.get_clock().now()
-        while not self.tf_buffer.can_transform(self.nav_frame, self.base_frame, Time(), timeout=Duration(seconds=0.1)):
+        while not self.tf_buffer.can_transform(self.nav_frame, self.base_frame, rclpy.time.Time(), timeout=Duration(seconds=0.1)):
             now = self.get_clock().now()
             if now > deadline:
                 frames = self.tf_buffer.all_frames_as_yaml()
@@ -126,10 +128,12 @@ class ExplorationNode(Node):
 
         self.frontier_finder = FrontierFinder(
             resolution=self.grid_resolution,
-            grid_size=self.grid_size,
+            grid_width=self.grid_width,
+            grid_height=self.grid_height,
             z_min=self.z_min,
             cluster_dist=self.cluster_dist,
             min_passage_width=self.min_passage_width,
+            sensor_range=self.sensor_range,
             logger=self.get_logger(),
         )
 
@@ -138,7 +142,6 @@ class ExplorationNode(Node):
             robot_count=self.robot_count,
             dispersion_threshold=self.dispersion_threshold,
             exclusion_radius=self.coordination_exclusion_radius,
-            reservation_ttl=self.reservation_ttl,
             logger=self.get_logger(),
         )
 
@@ -163,18 +166,8 @@ class ExplorationNode(Node):
         )
 
         self.create_subscription(
-            PoseGraph, '/cslam/viz/pose_graph',
-            self._pose_graph_cb, 10
-        )
-
-        self.create_subscription(
             PoseStamped, '/frontier/reservations',
-            self._reservations_cb, qos_transient
-        )
-
-        self.create_subscription(
-            Path, f'/{self.namespace}/darp/route',
-            self._darp_route_cb, qos_transient
+            self._reservations_cb, qos_volatile
         )
 
         self._grid_pub = self.create_publisher(
@@ -188,17 +181,17 @@ class ExplorationNode(Node):
             PoseStamped, f'/{self.namespace}/frontier/goal', 10
         )
         self._reservation_pub = self.create_publisher(
-            PoseStamped, '/frontier/reservations', qos_transient
+            PoseStamped, '/frontier/reservations', qos_volatile
         )
         self._wake_up_pub = self.create_publisher(
             WakeUp, '/darp/wake_up', 10
         )
 
         self._frontier_status_pub = self.create_publisher(
-            UInt8MultiArray, '/frontier/frontier_status', 10
+            Float32MultiArray, '/frontier/frontier_status', 10
         )
         self.create_subscription(
-            UInt8MultiArray, '/frontier/frontier_status',
+            Float32MultiArray, '/frontier/frontier_status',
             self._frontier_status_cb, 10
         )
 
@@ -278,23 +271,14 @@ class ExplorationNode(Node):
     def _cloud_cb(self, msg: PointCloud2) -> None:
         self._latest_cloud = msg
 
-    def _pose_graph_cb(self, msg: PoseGraph) -> None:
-        poses: Dict[int, Tuple[float, float]] = {}
-        values = list(getattr(msg, "values", []))
-        for v in values:
-            rid = int(v.key.robot_id)
-            pose = v.pose
-            poses[rid] = (float(pose.position.x), float(pose.position.y))
-        self.coordinator.update_robot_poses(poses)
-
     def _reservations_cb(self, msg: PoseStamped) -> None:
         frame = msg.header.frame_id
         if not frame:
             return
         try:
             parts = frame.split('_')
-            if len(parts) >= 2 and parts[0] == 'robot':
-                rid = int(parts[1])
+            if len(parts) >= 2 and parts[0].startswith('robot'):
+                rid = int(parts[0][5:])
             else:
                 return
         except (ValueError, IndexError):
@@ -303,32 +287,23 @@ class ExplorationNode(Node):
         if rid == self.robot_id:
             return
 
-        if msg.pose.position.z < 0:
-            self.coordinator.clear_other_reservation(rid)
-            return
+        self.coordinator.update_reservation(
+            rid, msg.pose.position.x, msg.pose.position.y
+        )
 
-        try:
-            transformed = self.tf_buffer.transform(msg, self.global_frame)
-            self.coordinator.update_reservation(
-                rid, transformed.pose.position.x, transformed.pose.position.y
-            )
-        except Exception as e:
-            self.get_logger().warn(f'Cannot transform reservation from {frame}: {e}')
-
-    def _darp_route_cb(self, msg: Path) -> None:
-        if len(msg.poses) > 0:
-            self.get_logger().info('DARP route received, exploration continues.')
-
-    def _frontier_status_cb(self, msg: UInt8MultiArray) -> None:
+    def _frontier_status_cb(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 2:
             return
-        rid = msg.data[0]
+        rid = int(msg.data[0])
         self._robot_has_frontier[rid] = bool(msg.data[1])
 
-    def _publish_frontier_status(self, has_frontier: bool) -> None:
+    def _publish_frontier_status(self, has_frontier: bool, robot_pos: Optional[Tuple[float, float]] = None) -> None:
         self._robot_has_frontier[self.robot_id] = has_frontier
-        msg = UInt8MultiArray()
-        msg.data = [self.robot_id, 1 if has_frontier else 0]
+        msg = Float32MultiArray()
+        if robot_pos is not None:
+            msg.data = [float(self.robot_id), 1.0 if has_frontier else 0.0, robot_pos[0], robot_pos[1]]
+        else:
+            msg.data = [float(self.robot_id), 1.0 if has_frontier else 0.0, 0.0, 0.0]
         self._frontier_status_pub.publish(msg)
 
     def _all_robots_done(self) -> bool:
@@ -352,24 +327,32 @@ class ExplorationNode(Node):
 
     def _exploration_loop_body(self) -> None:
         if self._state == ExplorationState.EXPLORING:
+            #№if self._latest_cloud is not None and self.tf_buffer.can_transform(
+            #    self.global_frame, self.nav_frame, Time(seconds=0), timeout=Duration(seconds=0.1)
+            #):
+            #    robot_pos = self._get_pose_in_frame(self.global_frame)
+            #    if robot_pos is not None:
+            #        self._latest_grid = self.frontier_finder.update_grid_from_cloud(
+            #            self._latest_cloud, robot_pos[0], robot_pos[1],
+            #            self.tf_buffer, self.global_frame, self.base_frame,
+            #        )
+            #        self._publish_grid(self.global_frame)
             return
 
         if self._state == ExplorationState.DONE:
+            self._publish_frontier_status(False, self._get_pose_in_frame(self.global_frame))
             return
 
         if self._latest_cloud is None:
             self.get_logger().info(f'[_exploration_loop] no cloud yet, waiting', throttle_duration_sec=5.0)
             return
 
-        from rclpy.time import Time
+        if not self.tf_buffer.can_transform(self.global_frame, self.nav_frame, rclpy.time.Time(seconds=0), timeout=Duration(seconds=0.1)):
+            self.get_logger().warn('TF from nav_frame to global_frame not available, skipping exploration cycle')
+            return
 
-        if self.tf_buffer.can_transform(self.global_frame, self.nav_frame, Time(seconds=0), timeout=Duration(seconds=0.1)):
-            frame_for_frontiers = self.global_frame
-            robot_pos_shared = self._get_pose_in_frame(self.global_frame)
-        else:
-            frame_for_frontiers = self.nav_frame
-            robot_pos_shared = self._get_current_pose()
-            self.get_logger().info(f'No TF {self.nav_frame} -> {self.global_frame}, using {self.nav_frame}')
+        frame_for_frontiers = self.global_frame
+        robot_pos_shared = self._get_pose_in_frame(self.global_frame)
 
         if robot_pos_shared is None:
             self.get_logger().warn('Cannot get robot pose, skipping exploration cycle.')
@@ -384,7 +367,7 @@ class ExplorationNode(Node):
         self._publish_grid(frame_for_frontiers)
 
         if not my_frontiers:
-            self._publish_frontier_status(False)
+            self._publish_frontier_status(False, robot_pos_shared)
             if self._all_robots_done():
                 self.get_logger().info('All robots have no frontiers — exploration complete')
                 self._call_darp_wake_up()
@@ -399,7 +382,7 @@ class ExplorationNode(Node):
         self.get_logger().info(f'select_best_frontiers returned {len(candidates)} candidates')
 
         if not candidates:
-            self._publish_frontier_status(False)
+            self._publish_frontier_status(False, robot_pos_shared)
             if self._all_robots_done():
                 self.get_logger().info('All robots have no frontiers — exploration complete')
                 self._call_darp_wake_up()
@@ -412,11 +395,11 @@ class ExplorationNode(Node):
         best = self._find_reachable_goal(candidates)
         if best is None:
             self.get_logger().warn('No reachable frontier goal found')
-            self._publish_frontier_status(False)
+            self._publish_frontier_status(False, robot_pos_shared)
             self._start_exploration_timer()
             return
 
-        self._publish_frontier_status(True)
+        self._publish_frontier_status(True, robot_pos_shared)
         self._publish_reservation(best[0], best[1])
         self._send_goal(best[0], best[1])
         self._state = ExplorationState.EXPLORING
@@ -438,11 +421,11 @@ class ExplorationNode(Node):
         msg = OccupancyGrid()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame if frame else self.global_frame
-        msg.info.resolution = 0.1
+        msg.info.resolution = self.grid_resolution
         msg.info.width = grid.shape[1]
         msg.info.height = grid.shape[0]
-        msg.info.origin.position.x = -20.0
-        msg.info.origin.position.y = -20.0
+        msg.info.origin.position.x = -self.grid_width / 2.0
+        msg.info.origin.position.y = -self.grid_height / 2.0
         msg.info.origin.position.z = 0.0
         msg.info.origin.orientation.w = 1.0
         msg.data = grid.flatten().astype(np.int8).tolist()
@@ -452,9 +435,14 @@ class ExplorationNode(Node):
         if msg.header.frame_id != self.global_frame:
             self.get_logger().warn(f'Ignored grid in {msg.header.frame_id}, expected {self.global_frame}')
             return
-        if abs(msg.info.resolution - 0.1) > 1e-6 or msg.info.width != 400 or msg.info.height != 400:
+        if rclpy.time.Time.from_msg(msg.header.stamp) < self._start_time:
+            self.get_logger().info('Ignored stale grid from before this node started')
             return
-        received = np.array(msg.data, dtype=np.int8).reshape(400, 400)
+        expected_width = int(self.grid_width / self.grid_resolution)
+        expected_height = int(self.grid_height / self.grid_resolution)
+        if abs(msg.info.resolution - self.grid_resolution) > 1e-6 or msg.info.width != expected_width or msg.info.height != expected_height:
+            return
+        received = np.array(msg.data, dtype=np.int8).reshape(expected_height, expected_width)
         r_unknown = int(np.sum(received == -1))
         r_free = int(np.sum(received == 0))
         r_occupied = int(np.sum(received == 100))
@@ -530,19 +518,6 @@ class ExplorationNode(Node):
 
         self._reservation_pub.publish(msg)
 
-    def _clear_reservation(self) -> None:
-        self.coordinator.clear_my_reservation()
-
-        msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.nav_frame
-        msg.pose.position.x = 0.0
-        msg.pose.position.y = 0.0
-        msg.pose.position.z = -1.0
-        msg.pose.orientation.w = 1.0
-
-        self._reservation_pub.publish(msg)
-
     def _send_goal(self, x: float, y: float) -> None:
         import math
         robot_pos = self._get_current_pose()
@@ -578,7 +553,6 @@ class ExplorationNode(Node):
 
         if self.navigator.isTaskComplete():
             result = self.navigator.getResult()
-            self._clear_reservation()
 
             if result == TaskResult.SUCCEEDED:
                 self.get_logger().info('Exploration goal reached.')
@@ -607,7 +581,6 @@ class ExplorationNode(Node):
                     self.get_logger().warn(
                         f'Exploration goal timeout ({elapsed:.1f}s > {self.frontier_timeout}s), aborting.'
                     )
-                    self._clear_reservation()
                     self._state = ExplorationState.IDLE
                     self._current_goal = None
                     self._goal_start_time = None
@@ -637,7 +610,6 @@ class ExplorationNode(Node):
         self._wake_up_pub.publish(msg)
 
     def _anomaly_callback(self, msg: AnomalyDetected) -> None:
-        self.get_logger().warn("Anomaly POG")
         ax = msg.pose.position.x
         ay = msg.pose.position.y
         if self.nav_frame != self.global_frame:
@@ -689,7 +661,6 @@ class ExplorationNode(Node):
             self._on_anomaly()
 
     def _on_anomaly(self) -> None:
-        self._clear_reservation()
         self._state = ExplorationState.IDLE
         self._current_goal = None
 
@@ -722,7 +693,6 @@ def main(args=None) -> None:
     finally:
         node.get_logger().info('Shutting down, cancelling navigation goal.')
         node.navigator.cancelTask()
-        node._clear_reservation()
         if node._exploration_timer:
             node._exploration_timer.cancel()
         if node._monitor_timer:

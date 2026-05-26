@@ -27,7 +27,7 @@
 ```
 
 ```bash
-    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/install/diff_drive_robot"
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/diff_drive_robot"
 ```
 
 Копирования тестового gazebo
@@ -61,6 +61,16 @@
    cd /Swarm-SLAM &&\
    export ROS_DOMAIN_ID=1 &&\
    ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=2 world:=two_rooms.world"
+```
+
+Запуск gazebo для 2-го робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash; \
+   source /Swarm-SLAM/install/setup.bash;\
+   cd /Swarm-SLAM &&\
+   export ROS_DOMAIN_ID=2 &&\
+   ros2 launch diff_drive_robot robot.launch.py max_nb_robots:=3 world:=pillars.world"
 ```
 
 Управляем 0-ым роботом:
@@ -126,7 +136,11 @@
    source /Swarm-SLAM/install/setup.bash &&\
    source /Swarm-SLAM/src/darp_areas/src/.venv/bin/activate &&\
    export ROS_DOMAIN_ID=100 &&\
-   ros2 run darp_areas darp_bridge_node.py"
+   ros2 run darp_areas darp_bridge_node.py --ros-args -p robot_count:=2"
+```
+
+```bash
+    docker exec -it swarmslam bash -c "rm -rf /Swarm-SLAM/src/cslam_visualization"
 ```
 
 ```bash
@@ -229,7 +243,7 @@
    source /opt/ros/jazzy/setup.bash; \
    source /Swarm-SLAM/install/setup.bash; \
    export ROS_DOMAIN_ID=100 &&\
-   ros2 topic pub --once /darp/wake_up darp_areas/msg/WakeUp \"{resolution: 0.5, padding: 0.0, obstacle_dilation: 1, use_equal_portions: true, portions: [], active_robot_ids: [0, 1]}\""
+   ros2 topic pub --once /darp/wake_up darp_areas/msg/WakeUp \"{resolution: 0.5, padding: 0.0, obstacle_dilation: 1, use_equal_portions: true, portions: [], active_robot_ids: [0,1]}\""
 ```
 
 ```bash
@@ -284,14 +298,14 @@
     cd Swarm-SLAM && colcon build --packages-select anomaly_detection"
 ```
 
-Запускаем anomaly_detection для 0 робота
+Запускаем anomaly_detection для 1 робота
 ```bash
    docker exec -it swarmslam bash -c "\
    source /opt/ros/jazzy/setup.bash &&\
    source /Swarm-SLAM/install/setup.bash &&\
    export ROS_DOMAIN_ID=0 &&\
    chmod +x /Swarm-SLAM/src/anomaly_detection/anomaly_detection_node.py &&\
-   ros2 run anomaly_detection anomaly_detection_node.py"
+   ros2 run anomaly_detection anomaly_detection_node.py --ros-args -p robot_id:=0"
 ```
 
 ```bash
@@ -353,7 +367,7 @@
    source /Swarm-SLAM/install/setup.bash &&\
    export ROS_DOMAIN_ID=0 &&\
    chmod +x /Swarm-SLAM/src/frontier_exploration/frontier_exploration/exploration_node.py &&\
-   ros2 run frontier_exploration exploration_node.py"
+   ros2 run frontier_exploration exploration_node.py --ros-args -p robot_count:=1 -p sensor_range:=5.0"
 ```
 
 Запускаем frontier_exploration для 1 робота
@@ -363,7 +377,17 @@
    source /Swarm-SLAM/install/setup.bash &&\
    export ROS_DOMAIN_ID=1 &&\
    chmod +x /Swarm-SLAM/src/frontier_exploration/frontier_exploration/exploration_node.py &&\
-   ros2 run frontier_exploration exploration_node.py --ros-args -p robot_id:=1 -p tf_static_topic:=/r1/tf_static"
+   ros2 run frontier_exploration exploration_node.py --ros-args -p robot_id:=1 -p tf_static_topic:=/r1/tf_static -p sensor_range:=5.0"
+```
+
+Запускаем frontier_exploration для 2 робота
+```bash
+   docker exec -it swarmslam bash -c "\
+   source /opt/ros/jazzy/setup.bash &&\
+   source /Swarm-SLAM/install/setup.bash &&\
+   export ROS_DOMAIN_ID=2 &&\
+   chmod +x /Swarm-SLAM/src/frontier_exploration/frontier_exploration/exploration_node.py &&\
+   ros2 run frontier_exploration exploration_node.py --ros-args -p robot_id:=2 -p tf_static_topic:=/r2/tf_static -p robot_count:=3"
 ```
 
 Симулируем аномалию
@@ -383,10 +407,16 @@
    export ROS_DOMAIN_ID=0 &&\
    python3 -c \"
 import rclpy, std_msgs.msg, nav_msgs.msg, numpy as np
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+import time; 
 rclpy.init()
 node = rclpy.create_node('grid_reset')
-pub = node.create_publisher(nav_msgs.msg.OccupancyGrid, '/frontier/grid', 10)
-import time; time.sleep(1)
+qos_transient = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+pub = node.create_publisher(nav_msgs.msg.OccupancyGrid, '/frontier/grid', qos_transient)
 msg = nav_msgs.msg.OccupancyGrid()
 msg.header.stamp = node.get_clock().now().to_msg()
 msg.header.frame_id = 'robot0_map'
@@ -394,7 +424,9 @@ msg.info.resolution = 0.1
 msg.info.width = 400; msg.info.height = 400
 msg.info.origin.position.x = -20.0; msg.info.origin.position.y = -20.0; msg.info.origin.orientation.w = 1.0
 msg.data = (np.full(160000, -1, dtype=np.int8)).tolist()
-pub.publish(msg)
+for i in range(10):
+    time.sleep(1)
+    pub.publish(msg)
 print('Grid reset published (all -1)')
 node.destroy_node()
 rclpy.shutdown()

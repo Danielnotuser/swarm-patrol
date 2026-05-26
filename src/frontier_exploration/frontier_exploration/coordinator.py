@@ -13,9 +13,6 @@ class ReservationData:
     y: float
     timestamp: float
 
-    def is_expired(self, ttl: float) -> bool:
-        return (time.time() - self.timestamp) > ttl
-
 
 class Coordinator:
     def __init__(
@@ -24,24 +21,15 @@ class Coordinator:
         robot_count: int,
         dispersion_threshold: float = 4.0,
         exclusion_radius: float = 3.0,
-        reservation_ttl: float = 30.0,
         logger=None,
     ):
         self.robot_id = robot_id
         self.robot_count = robot_count
         self.dispersion_threshold = dispersion_threshold
         self.exclusion_radius = exclusion_radius
-        self.reservation_ttl = reservation_ttl
         self.logger = logger
 
         self._reservations: Dict[int, ReservationData] = {}
-        self._other_robot_poses: Dict[int, Tuple[float, float]] = {}
-
-    def update_robot_poses(self, poses: Dict[int, Tuple[float, float]]) -> None:
-        self._other_robot_poses = {
-            rid: pos for rid, pos in poses.items()
-            if rid != self.robot_id
-        }
 
     def update_reservation(self, robot_id: int, x: float, y: float) -> None:
         if robot_id != self.robot_id:
@@ -52,18 +40,11 @@ class Coordinator:
                 timestamp=time.time(),
             )
 
-    def _clean_expired(self) -> None:
-        expired = [rid for rid, res in self._reservations.items()
-                   if res.is_expired(self.reservation_ttl)]
-        for rid in expired:
-            self._reservations.pop(rid, None)
-
     def select_best_frontiers(
         self,
         frontiers: List[Tuple[float, float, float, float]],
         my_pose: Tuple[float, float],
     ) -> List[Tuple[float, float, float]]:
-        self._clean_expired()
 
         if not frontiers:
             return []
@@ -75,14 +56,16 @@ class Coordinator:
         near_dropped = 0
         filtered = []
         for fx, fy, dist, unknown_ratio in frontiers:
-            if dist < 0.3:
+            if dist < 1.0:
                 near_dropped += 1
                 continue
 
             too_close = False
 
-            for rid, pos in self._other_robot_poses.items():
-                d = math.hypot(fx - pos[0], fy - pos[1])
+            for rid, res in self._reservations.items():
+                if rid == self.robot_id:
+                    continue
+                d = math.hypot(fx - res.x, fy - res.y)
                 if d < self.exclusion_radius:
                     too_close = True
                     break
@@ -103,18 +86,15 @@ class Coordinator:
         scored = []
         for fx, fy, dist, unknown_ratio in filtered:
             penalty = 0.0
-
-            for rid, pos in self._other_robot_poses.items():
-                d = math.hypot(fx - pos[0], fy - pos[1])
-                if d < self.dispersion_threshold:
-                    penalty += (self.dispersion_threshold - d) * 2.0
-
             for rid, res in self._reservations.items():
+                if rid == self.robot_id:
+                    continue
                 d = math.hypot(fx - res.x, fy - res.y)
-                if d < self.dispersion_threshold:
-                    penalty += 5.0
+                penalty += (1 / d) * 20.0
 
-            final_score = dist + penalty
+                self.logger.info(f'[coordinator] {rid} reserv: cur penalty = {penalty}, d = {d}')
+
+            final_score = dist * 0.01 + penalty
             scored.append((fx, fy, final_score))
 
         if not scored:
@@ -132,9 +112,3 @@ class Coordinator:
             y=y,
             timestamp=time.time(),
         )
-
-    def clear_my_reservation(self) -> None:
-        self._reservations.pop(self.robot_id, None)
-
-    def clear_other_reservation(self, robot_id: int) -> None:
-        self._reservations.pop(robot_id, None)

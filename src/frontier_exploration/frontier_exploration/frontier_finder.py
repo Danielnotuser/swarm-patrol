@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import math
 import cv2
@@ -40,32 +40,37 @@ class FrontierFinder:
     def __init__(
         self,
         resolution: float = 0.1,
-        grid_size: float = 40.0,
+        grid_width: float = 22.0,
+        grid_height: float = 14.0,
         z_min: float = 0.0,
         cluster_dist: float = 1.5,
         min_passage_width: float = 1.0,
         origin_x: float = 0.0,
         origin_y: float = 0.0,
+        sensor_range: float = 3.0,
         logger=None,
     ):
         self.resolution = resolution
-        self.grid_size = grid_size
+        self.grid_width = grid_width
+        self.grid_height = grid_height
         self.z_min = z_min
         self.cluster_dist = cluster_dist
         self.min_passage_width = min_passage_width
+        self.sensor_range = sensor_range
         self.logger = logger
 
-        self._cols = int(grid_size / resolution)
-        self._rows = int(grid_size / resolution)
-        self._half = grid_size / 2.0
+        self._cols = int(grid_width / resolution)
+        self._rows = int(grid_height / resolution)
+        self._half_x = grid_width / 2.0
+        self._half_y = grid_height / 2.0
         self._origin_x = origin_x
         self._origin_y = origin_y
 
         self._persistent_grid = np.full((self._rows, self._cols), -1, dtype=np.int8)
 
     def _world_to_grid(self, wx: float, wy: float) -> Tuple[int, int]:
-        c = int((wx - self._origin_x + self._half) / self.resolution)
-        r = int((wy - self._origin_y + self._half) / self.resolution)
+        c = int((wx - self._origin_x + self._half_x) / self.resolution)
+        r = int((wy - self._origin_y + self._half_y) / self.resolution)
         return r, c
 
     @staticmethod
@@ -156,7 +161,9 @@ class FrontierFinder:
 
         return obstacles, floor
 
-    def update_grid(self, obstacles: np.ndarray, floor: np.ndarray, robot_x: float, robot_y: float, max_range: float = 3.0) -> None:
+    def update_grid(self, obstacles: np.ndarray, floor: np.ndarray, robot_x: float, robot_y: float, max_range: Optional[float] = None) -> None:
+        if max_range is None:
+            max_range = self.sensor_range
         rr, rc = self._world_to_grid(robot_x, robot_y)
 
         for p in floor:
@@ -168,7 +175,12 @@ class FrontierFinder:
             else:
                 end_x, end_y = p[0], p[1]
             r, c = self._world_to_grid(end_x, end_y)
-            if 0 <= r < self._rows and 0 <= c < self._cols and self._persistent_grid[r, c] != 100:
+            if not (0 <= r < self._rows and 0 <= c < self._cols):
+                continue
+            for br, bc in self._bresenham(rr, rc, r, c):
+                if 0 <= br < self._rows and 0 <= bc < self._cols and self._persistent_grid[br, bc] != 100:
+                    self._persistent_grid[br, bc] = 0
+            if self._persistent_grid[r, c] != 100:
                 self._persistent_grid[r, c] = 0
 
         for p in obstacles:
@@ -187,6 +199,32 @@ class FrontierFinder:
                     self._persistent_grid[br, bc] = 0
             if dist <= max_range:
                 self._persistent_grid[r, c] = 100
+
+    def update_grid_from_cloud(
+        self,
+        cloud: PointCloud2,
+        robot_x: float,
+        robot_y: float,
+        tf_buffer,
+        target_frame: str,
+        source_frame: str,
+    ) -> np.ndarray:
+        obstacles, floor = self._pointcloud_to_numpy(cloud)
+
+        if obstacles.shape[0] == 0 and floor.shape[0] == 0:
+            if self.logger:
+                self.logger.info('[frontier_finder] No valid points in cloud for grid update')
+            return self._persistent_grid.copy()
+
+        points_to_transform = np.vstack([obstacles, floor]) if floor.shape[0] > 0 else obstacles
+        points = self._transform_points(points_to_transform, tf_buffer, target_frame, source_frame)
+
+        if points.shape[0] < 10:
+            return self._persistent_grid.copy()
+
+        num_obstacles = obstacles.shape[0]
+        self.update_grid(points[:num_obstacles], points[num_obstacles:], robot_x, robot_y)
+        return self._persistent_grid.copy()
 
     def _find_frontier_cells(self, grid: np.ndarray) -> np.ndarray:
         frontier_mask = np.zeros_like(grid, dtype=np.uint8)
@@ -237,15 +275,15 @@ class FrontierFinder:
 
             mask = labels == label
             rows, cols = np.where(mask)
-            wxs = self._origin_x - self._half + cols * self.resolution
-            wys = self._origin_y - self._half + rows * self.resolution
+            wxs = self._origin_x - self._half_x + cols * self.resolution
+            wys = self._origin_y - self._half_y + rows * self.resolution
             dists = np.sqrt((wxs - robot_x) ** 2 + (wys - robot_y) ** 2)
             dist = float(dists.mean())
 
-            margin = 6
-            sorted_idx = np.argsort(dists)[::-1]
-            chosen_idx = sorted_idx[0]
-            no_clear_candidate = True
+            margin = max(1, int(0.6 / self.resolution))
+            sorted_idx = np.argsort(dists)
+            chosen_idx = None
+            max_goal_dist = 5.0
             for idx in sorted_idx:
                 r, c = rows[idx], cols[idx]
                 clear = True
@@ -262,53 +300,49 @@ class FrontierFinder:
                             break
                     if not clear:
                         break
-                if clear:
-                    chosen_idx = idx
-                    no_clear_candidate = False
-                    break
+                if not clear:
+                    continue
 
-            if no_clear_candidate:
+                wx_cell = wxs[idx]
+                wy_cell = wys[idx]
+                goal_dist = math.hypot(wx_cell - robot_x, wy_cell - robot_y)
+
+                if goal_dist > max_goal_dist:
+                    scale = max_goal_dist / goal_dist
+                    wx = robot_x + (wx_cell - robot_x) * scale
+                    wy = robot_y + (wy_cell - robot_y) * scale
+                    cc = int((wx - (self._origin_x - self._half_x)) / self.resolution)
+                    rr = int((wy - (self._origin_y - self._half_y)) / self.resolution)
+                    clear = True
+                    for dr in range(-margin, margin + 1):
+                        nr = rr + dr
+                        if nr < 0 or nr >= self._rows:
+                            continue
+                        for dc in range(-margin, margin + 1):
+                            nc = cc + dc
+                            if nc < 0 or nc >= self._cols:
+                                continue
+                            if self._persistent_grid[nr, nc] == 100:
+                                clear = False
+                                break
+                        if not clear:
+                            break
+                    if not clear:
+                        continue
+                else:
+                    wx = wx_cell
+                    wy = wy_cell
+
+                chosen_idx = idx
+                break
+
+            if chosen_idx is None:
                 if self.logger:
                     self.logger.info(
                         f'[frontier_finder]   label {label}: area={area}, dist={dist:.1f}, '
                         f'ALL cells blocked by obstacle (margin={margin})'
                     )
                 continue
-
-            wx = wxs[chosen_idx]
-            wy = wys[chosen_idx]
-
-            dx = wx - robot_x
-            dy = wy - robot_y
-            goal_dist = math.hypot(dx, dy)
-            max_goal_dist = 5.0
-            if goal_dist > max_goal_dist:
-                scale = max_goal_dist / goal_dist
-                wx = robot_x + dx * scale
-                wy = robot_y + dy * scale
-                cc = int((wx - (self._origin_x - self._half)) / self.resolution)
-                rr = int((wy - (self._origin_y - self._half)) / self.resolution)
-                clear = True
-                for dr in range(-margin, margin + 1):
-                    nr = rr + dr
-                    if nr < 0 or nr >= self._rows:
-                        continue
-                    for dc in range(-margin, margin + 1):
-                        nc = cc + dc
-                        if nc < 0 or nc >= self._cols:
-                            continue
-                        if self._persistent_grid[nr, nc] == 100:
-                            clear = False
-                            break
-                    if not clear:
-                        break
-                if not clear:
-                    if self.logger:
-                        self.logger.info(
-                            f'[frontier_finder]   label {label}: area={area}, dist={dist:.1f}, '
-                            f'clamped goal blocked by obstacle (margin={margin})'
-                        )
-                    continue
 
             cx, cy = centroids[label]
             r_min = max(0, int(cx) - 5)
@@ -383,7 +417,7 @@ class FrontierFinder:
 
         # Update persistent grid with new observations
         num_obstacles = obstacles.shape[0]
-        self.update_grid(points[:num_obstacles], points[num_obstacles:], robot_x, robot_y)
+        self.update_grid(points[:num_obstacles], points[num_obstacles:], robot_x, robot_y, self.sensor_range)
 
         grid = self._persistent_grid
         occupied_cells = (grid == 100).sum()

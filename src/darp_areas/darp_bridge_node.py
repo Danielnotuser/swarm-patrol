@@ -23,13 +23,13 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float32MultiArray
 from visualization_msgs.msg import Marker
 
 from ament_index_python.packages import get_package_share_directory
 from tf2_ros import Buffer, TransformListener
 
-from cslam_common_interfaces.msg import PoseGraph
+#from cslam_common_interfaces.msg import PoseGraph
 from darp_areas.msg import WakeUp
 
 #os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -118,6 +118,7 @@ class DarpBridgeNode(Node):
         self.declare_parameter("default_obstacle_dilation", 0)
         self.declare_parameter("obstacle_threshold", 0)
         self.declare_parameter("publish_unknown_outside", False)
+        self.declare_parameter("visualize_darp", False)
 
         self.robot_count = int(self.get_parameter("robot_count").value)
         self.robot_prefix = str(self.get_parameter("robot_prefix").value)
@@ -129,12 +130,14 @@ class DarpBridgeNode(Node):
         self.default_obstacle_dilation = int(self.get_parameter("default_obstacle_dilation").value)
         self.obstacle_threshold = float(self.get_parameter("obstacle_threshold").value)
         self.publish_unknown_outside = bool(self.get_parameter("publish_unknown_outside").value)
+        self.visualize_darp = bool(self.get_parameter("visualize_darp").value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.accumulated_markers: Dict[int, List[Marker]] = defaultdict(list)
         self.latest_robot_pose: List[Optional[Pose]] = [None] * self.robot_count
+        self._pose_timestamps: List[float] = [0.0] * self.robot_count
         self.latest_lock = threading.Lock()
 
         self.min_x = 1000
@@ -153,18 +156,40 @@ class DarpBridgeNode(Node):
             callback_group=self.cb_group,
         )
 
-        self.pose_graph_sub = self.create_subscription(
-            PoseGraph,
-            self.pose_graph_topic,
-            self._pose_graph_cb,
-            10,
-            callback_group=self.cb_group,
-        )
+        #self.pose_graph_sub = self.create_subscription(
+        #    PoseGraph,
+        #    self.pose_graph_topic,
+        #    self._pose_graph_cb,
+        #    10,
+        #    callback_group=self.cb_group,
+        #)
 
         self.wake_sub = self.create_subscription(
             WakeUp,
             "/darp/wake_up",
             self._wake_up_topic_cb,
+            10,
+            callback_group=self.cb_group,
+        )
+
+        frontier_grid_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE
+        )
+        self.frontier_grid_sub = self.create_subscription(
+            OccupancyGrid,
+            "/frontier/grid",
+            self._frontier_grid_cb,
+            frontier_grid_qos,
+            callback_group=self.cb_group,
+        )
+        self.latest_frontier_grid: Optional[OccupancyGrid] = None
+
+        self.frontier_status_sub = self.create_subscription(
+            Float32MultiArray,
+            "/frontier/frontier_status",
+            self._frontier_status_cb,
             10,
             callback_group=self.cb_group,
         )
@@ -177,6 +202,7 @@ class DarpBridgeNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
+
         for i in range(self.robot_count):
             ns = f"{self.robot_prefix}{i}"
             self.area_pubs.append(
@@ -271,43 +297,30 @@ class DarpBridgeNode(Node):
 
         return np.asarray(pts, dtype=np.float64)
 
-    # ------------------------ PoseGraph handling ------------------------
-
-    def _extract_latest_pose_from_pose_graph(self, msg: PoseGraph) -> tuple[Optional[Pose], Optional[str]]:
-        values = list(getattr(msg, "values", []))
-        if values:
-            latest = max(values, key=lambda v: int(v.key.keyframe_id))
-            return deepcopy(latest.pose), f"robot{latest.key.robot_id}_map"
-        else:
-            return None, None
-        #edges = list(getattr(msg, "edges", []))
-        #if not edges:
-        #    return None, None
-
-        #edges = sorted(
-        #    edges,
-        #    key=lambda e: (int(e.key_from.keyframe_id), int(e.key_to.keyframe_id)),
-        #)
-
-        #x, y, yaw = 0.0, 0.0, 0.0
-        #for e in edges:
-        #    dx = float(e.measurement.position.x)
-        #    dy = float(e.measurement.position.y)
-        #    dyaw = yaw_from_quat(e.measurement.orientation)
-        #    c = math.cos(yaw)
-        #    s = math.sin(yaw)
-        #    x = x + c * dx - s * dy
-        #    y = y + s * dx + c * dy
-        #    yaw = yaw + dyaw
-
-        #pose = Pose()
-        #pose.position.x = x
-        #pose.position.y = y
-        #pose.position.z = 0.0
-        #pose.orientation = quat_from_yaw(yaw)
-        #return pose, frame_id
-
     # ------------------------ ROS callbacks ------------------------
+
+    def _frontier_grid_cb(self, msg: OccupancyGrid) -> None:
+        with self.latest_lock:
+            self.latest_frontier_grid = msg
+        self.get_logger().info(
+            f"Received frontier grid: {msg.info.width}x{msg.info.height}, "
+            f"res={msg.info.resolution}, frame={msg.header.frame_id}"
+        )
+
+    def _frontier_status_cb(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < 4:
+            return
+        rid = int(msg.data[0])
+        if not (0 <= rid < self.robot_count):
+            return
+        pose = Pose()
+        pose.position.x = float(msg.data[2])
+        pose.position.y = float(msg.data[3])
+        pose.position.z = 0.0
+        pose.orientation.w = 1.0
+        with self.latest_lock:
+            self.latest_robot_pose[rid] = pose
+            self._pose_timestamps[rid] = time.time()
 
     def _marker_cb(self, msg: Marker) -> None:
         robot_idx = parse_robot_index(msg.ns)
@@ -320,24 +333,60 @@ class DarpBridgeNode(Node):
         with self.latest_lock:
             self.accumulated_markers[robot_idx].append(msg)
 
-    def _pose_graph_cb(self, msg: PoseGraph) -> None:
-        robot_idx = int(msg.robot_id)
-        if not (0 <= robot_idx < self.robot_count):
-            return
+    # ------------------------ PoseGraph handling (commented — unused, using frontier_status instead) ------------------------
 
-        pose, frame_id = self._extract_latest_pose_from_pose_graph(msg)
-        if pose is None or frame_id is None:
-            return
+    #def _extract_latest_pose_from_pose_graph(self, msg: PoseGraph) -> tuple[Optional[Pose], Optional[str]]:
+    #    values = list(getattr(msg, "values", []))
+    #    if values:
+    #        latest = max(values, key=lambda v: int(v.key.keyframe_id))
+    #        return deepcopy(latest.pose), f"robot{latest.key.robot_id}_map"
+    #    else:
+    #        return None, None
+    #    #edges = list(getattr(msg, "edges", []))
+    #    #if not edges:
+    #    #    return None, None
+    #
+    #    #edges = sorted(
+    #    #    edges,
+    #    #    key=lambda e: (int(e.key_from.keyframe_id), int(e.key_to.keyframe_id)),
+    #    #)
+    #
+    #    #x, y, yaw = 0.0, 0.0, 0.0
+    #    #for e in edges:
+    #    #    dx = float(e.measurement.position.x)
+    #    #    dy = float(e.measurement.position.y)
+    #    #    dyaw = yaw_from_quat(e.measurement.orientation)
+    #    #    c = math.cos(yaw)
+    #    #    s = math.sin(yaw)
+    #    #    x = x + c * dx - s * dy
+    #    #    y = y + s * dx + c * dy
+    #    #    yaw = yaw + dyaw
+    #
+    #    #pose = Pose()
+    #    #pose.position.x = x
+    #    #pose.position.y = y
+    #    #pose.position.z = 0.0
+    #    #pose.orientation = quat_from_yaw(yaw)
+    #    #return pose, frame_id
 
-        transformed_pose = self._transform_pose_to_frame(pose, frame_id, self.default_frame_id)
-
-        with self.latest_lock:
-            if self.latest_robot_pose[robot_idx] != transformed_pose:
-                self.get_logger().info(
-                    f"PoseGraph robot {robot_idx}: latest pose stored in {self.default_frame_id} "
-                    f"= ({transformed_pose.position.x:.3f}, {transformed_pose.position.y:.3f})"
-                )
-            self.latest_robot_pose[robot_idx] = transformed_pose
+    #def _pose_graph_cb(self, msg: PoseGraph) -> None:
+    #    robot_idx = int(msg.robot_id)
+    #    if not (0 <= robot_idx < self.robot_count):
+    #        return
+    #
+    #    pose, frame_id = self._extract_latest_pose_from_pose_graph(msg)
+    #    if pose is None or frame_id is None:
+    #        return
+    #
+    #    transformed_pose = self._transform_pose_to_frame(pose, frame_id, self.default_frame_id)
+    #
+    #    with self.latest_lock:
+    #        if self.latest_robot_pose[robot_idx] != transformed_pose:
+    #            self.get_logger().info(
+    #                f"PoseGraph robot {robot_idx}: latest pose stored in {self.default_frame_id} "
+    #                f"= ({transformed_pose.position.x:.3f}, {transformed_pose.position.y:.3f})"
+    #            )
+    #        self.latest_robot_pose[robot_idx] = transformed_pose
 
 
     # ------------------------ Wake-up (topic) ------------------------
@@ -353,21 +402,44 @@ class DarpBridgeNode(Node):
                 self.get_logger().warn("DARP already running, ignoring wake-up request.")
                 return
 
-            with self.latest_lock:
-                markers_copy = deepcopy(self.accumulated_markers)
-                poses_copy = deepcopy(self.latest_robot_pose)
+            deadline = time.time() + 7.0
+            while time.time() < deadline:
+                with self.latest_lock:
+                    poses_copy = deepcopy(self.latest_robot_pose)
+                    timestamps_copy = list(self._pose_timestamps)
+                now = time.time()
+                all_fresh = True
+                for rid in active_ids:
+                    if rid >= len(poses_copy) or poses_copy[rid] is None:
+                        all_fresh = False
+                        break
+                    if now - timestamps_copy[rid] > 0.5:
+                        all_fresh = False
+                        break
+                if all_fresh:
+                    break
+                time.sleep(0.1)
 
-            missing_markers = [i for i in active_ids if i not in markers_copy]
-            has_pose = [i for i in active_ids if i < len(poses_copy) and poses_copy[i] is not None]
-            missing_poses = [i for i in active_ids if i not in has_pose]
-
-            if missing_markers:
-                self.get_logger().error(f"Missing cloudmarker for robots: {missing_markers}")
-                return
+            missing_poses = [rid for rid in active_ids if rid >= len(poses_copy) or poses_copy[rid] is None]
 
             if missing_poses:
-                self.get_logger().error(f"Missing pose_graph poses for robots: {missing_poses}")
+                self.get_logger().error(f"Missing poses for robots: {missing_poses} after 1s timeout")
                 return
+
+            for rid in active_ids:
+                p = poses_copy[rid]
+                age = now - timestamps_copy[rid]
+                self.get_logger().info(f'DARP start robot {rid}: ({p.position.x:.2f}, {p.position.y:.2f}), age={age:.2f}s')
+
+            with self.latest_lock:
+                markers_copy = deepcopy(self.accumulated_markers)
+                has_frontier_grid = self.latest_frontier_grid is not None
+
+            if not has_frontier_grid:
+                missing_markers = [i for i in active_ids if i not in markers_copy]
+                if missing_markers:
+                    self.get_logger().error(f"Missing cloudmarker for robots: {missing_markers}")
+                    return
 
             self.worker_thread = threading.Thread(
                 target=self._run_darp_job,
@@ -388,7 +460,18 @@ class DarpBridgeNode(Node):
     ) -> None:
         try:
             n_robots = len(active_ids)
-            grid = self._build_raster_grid(msg)
+            with self.latest_lock:
+                frontier_grid = self.latest_frontier_grid
+            if frontier_grid is not None:
+                self.get_logger().info(
+                    "DARP running in frontier grid"
+                )
+                grid = self._build_from_frontier_grid(frontier_grid, msg)
+            else:
+                self.get_logger().info(
+                    "DARP running in markers grid"
+                )
+                grid = self._build_raster_grid(msg)
             start_cells = self._resolve_start_cells(grid, poses, active_ids)
             portions = self._resolve_portions(msg, n_robots)
 
@@ -408,7 +491,7 @@ class DarpBridgeNode(Node):
                 start_cells,
                 portions,
                 obs_pos,
-                True,
+                self.visualize_darp,
             )
 
             if not getattr(planner, "DARP_success", False):
@@ -423,9 +506,111 @@ class DarpBridgeNode(Node):
 
     # ------------------------ Grid build ------------------------
 
+    def _build_from_frontier_grid(
+        self,
+        frontier_grid: OccupancyGrid,
+        msg: WakeUp,
+    ) -> RasterGrid:
+        resolution = frontier_grid.info.resolution
+        width = frontier_grid.info.width
+        height = frontier_grid.info.height
+        origin_x = frontier_grid.info.origin.position.x
+        origin_y = frontier_grid.info.origin.position.y
+
+        target_resolution = msg.resolution
+        obstacle_dilation = msg.obstacle_dilation
+        padding_m = float(msg.padding) if msg.padding >= 0.0 else self.default_padding
+
+        occupancy = np.array(frontier_grid.data, dtype=np.int8).reshape(height, width)
+
+        unknown = int(np.sum(occupancy == -1))
+        free = int(np.sum(occupancy == 0))
+        occ = int(np.sum(occupancy == 100))
+        self.get_logger().info(
+            f"Frontier grid: {width}x{height}, res={resolution}, "
+            f"unknown={unknown}, free={free}, occupied={occ}"
+        )
+
+        un_mask = (occupancy == -1).astype(np.float32)
+        fr_mask = (occupancy == 0).astype(np.float32)
+
+        kernel = np.ones((3, 3), dtype=np.float32)
+        kernel[1, 1] = 0
+
+        n_unknown = cv2.filter2D(un_mask, -1, kernel, borderType=cv2.BORDER_CONSTANT)
+        n_free = cv2.filter2D(fr_mask, -1, kernel, borderType=cv2.BORDER_CONSTANT)
+
+        occupancy[(n_unknown == 0) & un_mask.astype(bool)] = 0
+        occupancy[(n_free == 0) & un_mask.astype(bool)] = 100
+
+        if abs(resolution - target_resolution) > 1e-6:
+            tgt_width = int(round(width * resolution / target_resolution))
+            tgt_height = int(round(height * resolution / target_resolution))
+
+            occ_mask = (occupancy == 100).astype(np.uint8) * 255
+            unk_mask = (occupancy == -1).astype(np.uint8) * 255
+
+            down_occ = cv2.resize(occ_mask, (tgt_width, tgt_height), interpolation=cv2.INTER_AREA)
+            down_unk = cv2.resize(unk_mask, (tgt_width, tgt_height), interpolation=cv2.INTER_AREA)
+
+            occupancy = np.full((tgt_height, tgt_width), 0, dtype=np.int8)
+            occupancy[down_occ > 0] = 100
+            occupancy[down_unk > 0] = 100
+
+            width = tgt_width
+            height = tgt_height
+            resolution = target_resolution
+            origin_x = frontier_grid.info.origin.position.x
+            origin_y = frontier_grid.info.origin.position.y
+
+            self.get_logger().info(
+                f"Downsampled to: {width}x{height}, res={resolution}"
+            )
+
+        occupancy[occupancy != 100] = 0
+
+        dil_cells = obstacle_dilation if obstacle_dilation >= 0 else self.default_obstacle_dilation
+        if dil_cells > 0:
+            kernel = np.ones((2 * dil_cells + 1, 2 * dil_cells + 1), dtype=np.uint8)
+            occ_bin = (occupancy > 0).astype(np.uint8) * 255
+            occ_bin = cv2.dilate(occ_bin, kernel, iterations=1)
+            original_mask = (occupancy == 100)
+            occupancy = np.where(occ_bin > 0, 100, 0).astype(np.int8)
+            occupancy[(occ_bin > 0) & (~original_mask)] = 50
+
+        padding_cells = max(0, int(padding_m / resolution))
+        padded = np.full(
+            (height + 2 * padding_cells, width + 2 * padding_cells),
+            100,
+            dtype=np.uint8,
+        )
+        padded[padding_cells:padding_cells + height, padding_cells:padding_cells + width] = occupancy.astype(np.uint8)
+
+        occ = padded
+        origin_x -= padding_cells * resolution
+        origin_y -= padding_cells * resolution
+
+        free_mask = (occ == 0).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(free_mask, connectivity=4)
+        if num_labels > 2:
+            counts = np.bincount(labels.reshape(-1))
+            counts[0] = 0
+            keep = int(np.argmax(counts))
+            free_keep = labels == keep
+            occ[~free_keep] = 100
+
+        frame_id = frontier_grid.header.frame_id or self.default_frame_id
+        return RasterGrid(
+            occupancy=occ,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            resolution=resolution,
+            frame_id=frame_id,
+        )
+
     def _build_raster_grid(
-            self,
-            msg: WakeUp,
+        self,
+        msg: WakeUp,
     ) -> RasterGrid:
         resolution = float(msg.resolution) if msg.resolution > 0.0 else self.default_resolution
         padding = float(msg.padding) if msg.padding >= 0.0 else self.default_padding
@@ -675,7 +860,7 @@ class DarpBridgeNode(Node):
         # --- Фильтрация: оставляем точки с шагом не более max_step и не чаще min_step ---
         max_step_m = 1.0  # максимально допустимое расстояние между точками пути
         min_step_m = 0.05  # минимальное (чтобы избежать дублей)
-        max_points = 800  # ограничение общего числа точек
+        #max_points = 800  # ограничение общего числа точек
 
         filtered_vertices = [start_rc]
         prev_x, prev_y = indices_to_xy(*start_rc)
@@ -717,9 +902,9 @@ class DarpBridgeNode(Node):
             msg.poses.append(p)
             prev_x, prev_y = x, y
 
-            if len(msg.poses) >= max_points:
-                self.get_logger().warn(f"Route truncated to {max_points} points")
-                break
+            #if len(msg.poses) >= max_points:
+            #    self.get_logger().warn(f"Route truncated to {max_points} points")
+            #    break
 
         # Если получилось слишком мало точек (например, только старт), добавляем хотя бы одну целевую
         if len(msg.poses) < 2:
