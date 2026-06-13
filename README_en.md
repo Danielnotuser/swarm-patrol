@@ -19,11 +19,10 @@
 ### Key Features
 
 - **Decentralized SLAM**: No central server; peer-to-peer communication via Zenoh.
-- **Multi-robot coordination**: Reservation protocol prevents robots from selecting the same area.
+- **Multi-robot coordination**: Reservation protocol prevents robots from selecting the same area (frontier navigation).
 - **Adaptive exploration**: Switches between frontier-based exploration and DARP coverage path following.
 - **Anomaly detection**: Real-time comparison of LiDAR scans against the occupancy grid to detect unexpected obstacles (appearance / disappearance).
 - **Heartbeat monitoring**: Detects robot failure and triggers re-division.
-- **Robot-agnostic**: Supports simulated (Gazebo/Ignition) and real robots (Ouster, Intel RealSense, OAK-D).
 - **ROS 2 + Gazebo simulation**: Full simulation stack with configurable worlds and robot counts.
 
 ---
