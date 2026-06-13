@@ -358,7 +358,8 @@ Swarm-Patrol/
 ├── media/                              # Screenshots and media
 │   ├── path.png                        # DARP coverage paths + grid
 │   └── appearance_hit.png              # Anomaly appearance detection
-└── README.md                           # This file
+└── README_en.md                        # This file
+└── README.md                           # Russian version (русский) 
 ```
 
 ## Docker
