@@ -358,8 +358,8 @@ Swarm-Patrol/
 ├── media/                              # Скриншоты и медиа
 │   ├── path.png                        # Маршруты DARP + карта
 │   └── appearance_hit.png              # Детекция аномалии появления
-└── README.md                           # Этот файл (английский)
-└── README_rus.md                       # Русская версия
+└── README.md                           # Этот файл (русский) 
+└── README_en.md                        # Английская версия (English version)
 ```
 
 ## Docker
